@@ -183,6 +183,16 @@ pub fn system_prompt(req: &ChatRequest) -> String {
 /// <|start|>assistant<|channel|>final<|message|>Well met, traveller!<|return|>
 /// ```
 ///
+/// Gemma 4 speaks a dialect with *asymmetric* tags: `<|name>` opens a channel
+/// and `<name|>` closes it, with the user-facing reply as bare text outside
+/// any channel:
+///
+/// ```text
+/// <|channel>thought
+/// The player greeted me...
+/// <channel|>Well met, traveller!
+/// ```
+///
 /// Without filtering, those tags and the private "thinking" channel leak into
 /// the chat bubble. This is a small streaming state machine: feed it token
 /// pieces as they arrive and it returns only the user-facing text, hiding
@@ -264,8 +274,8 @@ impl ReplyFilter {
             let before = self.pending[..lt].to_string();
             self.consume_text(&before, &mut out);
             let rest = self.pending[lt..].to_string();
-            if let Some((inner, len)) = match_tag(&rest) {
-                self.handle_tag(&inner);
+            if let Some((inner, shape, len)) = match_tag(&rest) {
+                self.handle_tag(&inner, shape);
                 self.pending = rest[len..].to_string();
             } else if is_partial_tag(&rest) {
                 // Might still become a tag once more pieces arrive; hold it.
@@ -285,9 +295,10 @@ impl ReplyFilter {
     /// never left silent.
     pub fn finish(&mut self) -> String {
         let mut out = String::new();
-        // A trailing partial tag never completed — it was real text after all.
+        // A trailing partial tag never completed. A '<' with a pipe after it
+        // is almost certainly truncated markup; anything else was real text.
         let leftover = std::mem::take(&mut self.pending);
-        if !leftover.starts_with("<|") {
+        if !(leftover.starts_with('<') && leftover.contains('|')) {
             self.consume_text(&leftover, &mut out);
         }
         if self.shown.trim().is_empty() {
@@ -338,8 +349,16 @@ impl ReplyFilter {
         self.mode = Mode::Body;
     }
 
-    fn handle_tag(&mut self, inner: &str) {
+    fn handle_tag(&mut self, inner: &str, shape: TagShape) {
         self.harmony = true;
+        if shape == TagShape::Close {
+            // Gemma-4 style `<name|>`: the channel is over, and whatever
+            // follows is the user-facing reply (there is no explicit "final"
+            // channel in this dialect).
+            self.mode = Mode::Body;
+            self.visible = true;
+            return;
+        }
         match inner.trim().to_ascii_lowercase().as_str() {
             "channel" => {
                 self.name.clear();
@@ -364,22 +383,68 @@ impl ReplyFilter {
     }
 }
 
-/// If `s` starts with a complete `<|…|>` control tag, return its inner text and
-/// the byte length consumed.
-fn match_tag(s: &str) -> Option<(String, usize)> {
-    let rest = s.strip_prefix("<|")?;
-    let close = rest.find("|>")?;
-    // Reject anything with a newline inside — that's not a real control tag.
-    let inner = &rest[..close];
-    if inner.contains('\n') {
-        return None;
-    }
-    Some((inner.to_string(), 2 + close + 2))
+#[derive(Clone, Copy, PartialEq)]
+enum TagShape {
+    /// Harmony `<|name|>`.
+    Symmetric,
+    /// Gemma-4 channel opener `<|name>`.
+    Open,
+    /// Gemma-4 channel closer `<name|>`.
+    Close,
 }
 
-/// Could `s` still grow into a `<|…|>` tag once more pieces arrive?
+/// True for the characters allowed in a bare `<name|>` closing tag. Kept
+/// strict (word-like only) so ordinary dialogue containing '<' never matches.
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// If `s` starts with a complete control tag, return its inner text, its
+/// shape, and the byte length consumed.
+fn match_tag(s: &str) -> Option<(String, TagShape, usize)> {
+    if let Some(rest) = s.strip_prefix("<|") {
+        let close = rest.find('>')?;
+        let inner = &rest[..close];
+        // A newline or '<' inside means this is not a real control tag.
+        if inner.contains('\n') || inner.contains('<') {
+            return None;
+        }
+        return if let Some(name) = inner.strip_suffix('|') {
+            Some((name.to_string(), TagShape::Symmetric, 2 + close + 1))
+        } else if !inner.contains('|') {
+            Some((inner.to_string(), TagShape::Open, 2 + close + 1))
+        } else {
+            None
+        };
+    }
+    let rest = s.strip_prefix('<')?;
+    let bar = rest.find("|>")?;
+    let name = &rest[..bar];
+    if !name.is_empty() && name.chars().all(is_name_char) {
+        Some((name.to_string(), TagShape::Close, 1 + bar + 2))
+    } else {
+        None
+    }
+}
+
+/// Could `s` (which starts with '<') still grow into a control tag once more
+/// pieces arrive?
 fn is_partial_tag(s: &str) -> bool {
-    "<|".starts_with(s) || (s.starts_with("<|") && !s.contains("|>"))
+    if s == "<" || s == "<|" {
+        return true;
+    }
+    if let Some(rest) = s.strip_prefix("<|") {
+        // Heading toward `<|name|>` or `<|name>`: no closer yet, and at most
+        // one pipe, which must be trailing.
+        return !rest.contains('>')
+            && !rest.contains('\n')
+            && !rest.contains('<')
+            && (!rest.contains('|') || (rest.ends_with('|') && rest.matches('|').count() == 1));
+    }
+    // Heading toward `<name|>`: word-like name, optionally ending in the pipe.
+    let rest = &s[1..];
+    let name = rest.strip_suffix('|').unwrap_or(rest);
+    !name.is_empty() && !name.contains('|') && name.chars().all(is_name_char)
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +739,33 @@ mod filter_tests {
     fn lone_angle_bracket_is_text() {
         assert_eq!(run("3 < 5 is true", 2), "3 < 5 is true");
     }
+
+    /// Gemma-4's dialect: `<|channel>` opens, `<name|>` closes, and the reply
+    /// is bare text after the closer (the leak seen in NPC chat bubbles).
+    #[test]
+    fn gemma4_asymmetric_tags_with_reasoning() {
+        let raw = "<|channel>thought\nThe player approaches; be gruff.\n<channel|>Hey. What do you want?";
+        for chunk in [1, 3, 64] {
+            assert_eq!(run(raw, chunk), "Hey. What do you want?");
+        }
+    }
+
+    #[test]
+    fn gemma4_empty_thought_channel() {
+        let raw = "<|channel>thought\n<channel|>Hey. What do you want?";
+        assert_eq!(run(raw, 2), "Hey. What do you want?");
+    }
+
+    #[test]
+    fn gemma4_reasoning_only_falls_back() {
+        let raw = "<|channel>thought\nOnly musing here.\n<channel|>";
+        assert_eq!(run(raw, 4), "Only musing here.");
+    }
+
+    #[test]
+    fn angle_bracket_word_is_text() {
+        assert_eq!(run("I <3 slimes", 2), "I <3 slimes");
+    }
 }
 
 #[cfg(all(test, feature = "llm"))]
@@ -683,10 +775,13 @@ mod tests {
     /// End-to-end: load the real GGUF model (if present in ./models), run a
     /// persona chat, and require a streamed in-character reply.
     /// Ignored by default — run with `cargo test llm_end_to_end -- --ignored`.
+    /// Set `NOM_TEST_MODEL=/path/to/model.gguf` to test another model.
     #[test]
     #[ignore]
     fn llm_end_to_end() {
-        let model = std::path::Path::new("models/qwen2.5-0.5b-instruct-q4_k_m.gguf");
+        let path = std::env::var("NOM_TEST_MODEL")
+            .unwrap_or_else(|_| "models/qwen2.5-0.5b-instruct-q4_k_m.gguf".into());
+        let model = std::path::Path::new(&path);
         if !model.exists() {
             eprintln!("model not downloaded; skipping (run scripts/get-model.sh)");
             return;
@@ -752,6 +847,10 @@ mod tests {
         assert!(
             reply.trim().len() > 5,
             "expected a real reply, got: {reply:?}"
+        );
+        assert!(
+            !reply.contains("<|") && !reply.contains("|>"),
+            "control markup leaked into the reply: {reply:?}"
         );
     }
 }
