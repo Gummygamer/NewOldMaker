@@ -166,7 +166,8 @@ pub fn system_prompt(req: &ChatRequest) -> String {
     s.push_str(
         "Stay in character. Speak only as this character would, in plain spoken dialogue \
          (no narration, no quotation marks, no stage directions). Never write HTML or XML \
-         tags, markup, or your private thoughts — only the words you say aloud. \
+         tags, markup, code blocks, JSON, or tool calls, and never reveal your private \
+         thoughts — only the words you say aloud. You have no tools; just talk. \
          Keep replies to one to three short sentences.",
     );
     s
@@ -227,6 +228,10 @@ pub struct ReplyFilter {
     /// Name of the HTML-ish tag whose body is being hidden (e.g. `div` for
     /// `<div class="thought">…</div>`), so its closer restores visibility.
     hidden_tag: String,
+    /// Inside a ``` fenced code block. Models that degrade into emitting a
+    /// tool-call JSON blob wrap it in a fence; dialogue never contains one, so
+    /// everything between the fences is swallowed.
+    fence: bool,
     /// All user-facing text emitted so far (used for stop conditions / fallback).
     shown: String,
     /// Body of the most recent channel, kept as a last-resort fallback when no
@@ -322,15 +327,38 @@ impl ReplyFilter {
         self.pending.push_str(piece);
         let mut out = String::new();
         loop {
-            let Some(lt) = self.pending.find('<') else {
+            // The next thing worth stopping on: a code fence (always), plus a
+            // control tag when we're not already inside a fence.
+            let backtick = self.pending.find('`');
+            let lt = if self.fence {
+                None
+            } else {
+                self.pending.find('<')
+            };
+            let Some(pos) = min_opt(backtick, lt) else {
                 let text = std::mem::take(&mut self.pending);
                 self.consume_text(&text, &mut out);
                 break;
             };
-            let before = self.pending[..lt].to_string();
+            let before = self.pending[..pos].to_string();
             self.consume_text(&before, &mut out);
-            let rest = self.pending[lt..].to_string();
-            if let Some((inner, shape, len)) = match_tag(&rest) {
+            let rest = self.pending[pos..].to_string();
+            if rest.starts_with('`') {
+                // A run of three or more backticks opens or closes a fence.
+                let run = rest.chars().take_while(|&c| c == '`').count();
+                if run >= 3 {
+                    self.fence = !self.fence;
+                    self.pending = rest[run..].to_string();
+                } else if run == rest.len() {
+                    // One or two trailing backticks: might grow into a fence.
+                    self.pending = rest;
+                    break;
+                } else {
+                    // One or two backticks mid-text: ordinary dialogue.
+                    self.consume_text(&rest[..run], &mut out);
+                    self.pending = rest[run..].to_string();
+                }
+            } else if let Some((inner, shape, len)) = match_tag(&rest) {
                 self.handle_tag(&inner, shape);
                 self.pending = rest[len..].to_string();
             } else if is_partial_tag(&rest) {
@@ -362,7 +390,10 @@ impl ReplyFilter {
                 .unwrap_or(body.len());
             leftover.contains('|') || leftover.contains('=') || is_markup_name(&body[..name_end])
         };
-        if !markup {
+        // A trailing run of backticks is a fence marker that never completed;
+        // drop it rather than show stray backticks.
+        let backticks = !leftover.is_empty() && leftover.chars().all(|c| c == '`');
+        if !markup && !backticks {
             self.consume_text(&leftover, &mut out);
         }
         if self.shown.trim().is_empty() {
@@ -376,6 +407,11 @@ impl ReplyFilter {
     }
 
     fn consume_text(&mut self, text: &str, out: &mut String) {
+        if self.fence {
+            // Inside a fenced code block: never user-facing, and kept out of
+            // the fallback channel so a pure tool-call reply stays hidden.
+            return;
+        }
         match self.mode {
             Mode::SkipToTag => {}
             Mode::ReadingName => {
@@ -515,6 +551,14 @@ enum TagShape {
 /// strict (word-like only) so ordinary dialogue containing '<' never matches.
 fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// The smaller of two optional byte offsets, treating `None` as "no match".
+fn min_opt(a: Option<usize>, b: Option<usize>) -> Option<usize> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// If `s` starts with a complete control tag, return its inner text, its
@@ -1013,6 +1057,37 @@ mod filter_tests {
     #[test]
     fn truncated_html_tag_is_dropped() {
         assert_eq!(run("Move along.\n<div style=\"thou", 4), "Move along.\n");
+    }
+
+    /// The leak from the screenshot: the model tries to "use a tool" and emits
+    /// a fenced JSON blob instead of dialogue. The whole fence is swallowed.
+    #[test]
+    fn fenced_json_tool_call_is_swallowed() {
+        let raw = "```json\n{\n  \"action\": \"result\",\n  \"status\": \"unknown\"\n}\n```";
+        for chunk in [1, 3, 7, 64] {
+            assert_eq!(run(raw, chunk), "");
+        }
+    }
+
+    /// Dialogue surrounding a fenced block survives; only the fence is hidden.
+    #[test]
+    fn text_around_fence_survives() {
+        let raw = "Here you go.\n```json\n{\"x\": 1}\n```\nAnything else?";
+        for chunk in [1, 4, 64] {
+            assert_eq!(run(raw, chunk), "Here you go.\n\nAnything else?");
+        }
+    }
+
+    /// One or two backticks are ordinary text (inline emphasis), not a fence.
+    #[test]
+    fn stray_backticks_are_text() {
+        assert_eq!(run("it's a `test` word", 2), "it's a `test` word");
+    }
+
+    /// A fence that never closes swallows everything after it.
+    #[test]
+    fn unclosed_fence_is_swallowed() {
+        assert_eq!(run("Sure thing.\n```\n{\"a\":1}", 5), "Sure thing.\n");
     }
 }
 
