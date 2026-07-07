@@ -104,6 +104,8 @@ pub struct Dialogue {
     /// Some = interactive LLM chat; None = plain message box.
     pub chat: Option<NpcChat>,
     pub streaming: bool,
+    /// Seconds until the dialogue auto-closes; None = stays until dismissed.
+    pub auto_close: Option<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +345,13 @@ impl Game {
             return;
         }
 
-        if self.dialogue.is_some() {
+        if let Some(d) = &mut self.dialogue {
+            if let Some(t) = &mut d.auto_close {
+                *t -= dt;
+                if *t <= 0.0 {
+                    self.dialogue = None;
+                }
+            }
             // Dialogue UI handles its own input; Esc closes (checked there).
             return;
         }
@@ -549,6 +557,7 @@ impl Game {
                     text: text.clone(),
                     chat: None,
                     streaming: false,
+                    auto_close: None,
                 });
             }
             EventKind::Chest { item_id } => {
@@ -566,6 +575,7 @@ impl Game {
                         text: format!("Found {name}!"),
                         chat: None,
                         streaming: false,
+                        auto_close: None,
                     });
                 }
             }
@@ -580,6 +590,7 @@ impl Game {
                     text: "The party feels refreshed!".into(),
                     chat: None,
                     streaming: false,
+                    auto_close: None,
                 });
             }
             EventKind::BattleTrigger { troop_id, once } => {
@@ -618,6 +629,7 @@ impl Game {
                 text: String::new(),
                 chat: Some(chat),
                 streaming,
+                auto_close: None,
             });
             if streaming {
                 return;
@@ -631,7 +643,7 @@ impl Game {
             persona.fallback_lines[*idx % persona.fallback_lines.len()].clone()
         };
         *idx += 1;
-        self.dialogue = Some(Dialogue { speaker, text: line, chat: None, streaming: false });
+        self.dialogue = Some(Dialogue { speaker, text: line, chat: None, streaming: false, auto_close: None });
     }
 
     pub fn make_chat_request(&self, project: &ProjectData, chat: &NpcChat) -> ChatRequest {
@@ -673,6 +685,7 @@ impl Game {
                     }),
                     chat: None,
                     streaming: false,
+                    auto_close: Some(3.0),
                 });
             }
             battle::Outcome::Defeat => {
