@@ -52,7 +52,7 @@ impl App {
         let renderer = Hd2dRenderer::new(&rs.device, &rs.queue, rs.target_format, atlas);
         rs.renderer.write().callback_resources.insert(renderer);
 
-        let project = default_project();
+        let project = default_project(Language::default());
         let editor = EditorState::new(&project);
         App {
             project,
@@ -119,10 +119,34 @@ impl App {
     }
 
     fn new_project(&mut self) {
-        self.project = default_project();
+        // Keep the language the user currently has selected.
+        self.project = default_project(self.project.system.language);
         self.project_path = None;
         self.editor = EditorState::new(&self.project);
         self.stop_game();
+    }
+
+    /// When the language changes and the project is still the untouched starter
+    /// template, regenerate it in the new language so the default content
+    /// (spell names, items, enemies, maps…) follows the language too. Any
+    /// project the user has actually edited is left alone — only the language
+    /// field (already flipped by the picker) changes there.
+    fn relocalize_default_content(&mut self, old_lang: Language, new_lang: Language) {
+        // Never swap content out from under a running playtest.
+        if self.game.is_some() {
+            return;
+        }
+        // Compare against the pristine default for the previous language.
+        // Serializing both sides avoids needing `PartialEq` on every data type;
+        // forcing the language field equal isolates the comparison to content.
+        let mut baseline = self.project.clone();
+        baseline.system.language = old_lang;
+        let is_pristine = serde_json::to_string(&baseline).ok()
+            == serde_json::to_string(&default_project(old_lang)).ok();
+        if is_pristine {
+            self.project = default_project(new_lang);
+            self.editor = EditorState::new(&self.project);
+        }
     }
 
     // -----------------------------------------------------------------
@@ -159,13 +183,19 @@ impl App {
                     self.editor.apply_undo(&mut self.project);
                 }
                 if ui
-                    .button(egui::RichText::new("▶ Playtest  (F5)").color(egui::Color32::from_rgb(120, 220, 120)))
+                    .button(
+                        egui::RichText::new("▶ Playtest  (F5)")
+                            .color(egui::Color32::from_rgb(120, 220, 120)),
+                    )
                     .clicked()
                 {
                     self.game = Some(Game::new(&self.project));
                 }
             } else if ui
-                .button(egui::RichText::new("⏹ Stop  (F5)").color(egui::Color32::from_rgb(240, 120, 100)))
+                .button(
+                    egui::RichText::new("⏹ Stop  (F5)")
+                        .color(egui::Color32::from_rgb(240, 120, 100)),
+                )
                 .clicked()
             {
                 self.stop_game();
@@ -180,6 +210,7 @@ impl App {
                     crate::audio::toggle_muted();
                 }
                 ui.separator();
+                let old_lang = self.project.system.language;
                 let lang = &mut self.project.system.language;
                 egui::ComboBox::from_id_salt("game-language")
                     .selected_text(lang.name())
@@ -190,16 +221,20 @@ impl App {
                     })
                     .response
                     .on_hover_text("Game language");
+                let new_lang = self.project.system.language;
+                if new_lang != old_lang {
+                    self.relocalize_default_content(old_lang, new_lang);
+                }
                 ui.separator();
                 match &self.llm.status {
                     LlmStatus::Off => ui.weak("LLM: off"),
                     LlmStatus::Loading => ui.colored_label(egui::Color32::YELLOW, "LLM: loading…"),
-                    LlmStatus::Ready(name) => {
-                        ui.colored_label(egui::Color32::from_rgb(120, 220, 120), format!("LLM: {name}"))
-                    }
-                    LlmStatus::Error(e) => {
-                        ui.colored_label(egui::Color32::from_rgb(240, 120, 100), format!("LLM: {e}"))
-                    }
+                    LlmStatus::Ready(name) => ui.colored_label(
+                        egui::Color32::from_rgb(120, 220, 120),
+                        format!("LLM: {name}"),
+                    ),
+                    LlmStatus::Error(e) => ui
+                        .colored_label(egui::Color32::from_rgb(240, 120, 100), format!("LLM: {e}")),
                 };
                 ui.label(format!(
                     "· {}",
@@ -244,13 +279,31 @@ impl App {
             let pos = Vec3::new(ev.x as f32 + 0.5, top, ev.y as f32 + 0.5);
             match &ev.kind {
                 EventKind::Sign { .. } => {
-                    cutout.push(scene::sprite(pos, scene::PROP_SIZE, atlas.props[Prop::Signpost as usize], [1.0; 4], 0));
+                    cutout.push(scene::sprite(
+                        pos,
+                        scene::PROP_SIZE,
+                        atlas.props[Prop::Signpost as usize],
+                        [1.0; 4],
+                        0,
+                    ));
                 }
                 EventKind::Chest { .. } => {
-                    cutout.push(scene::sprite(pos, scene::PROP_SIZE, atlas.props[Prop::Barrel as usize], [1.3, 1.1, 0.5, 1.0], 0));
+                    cutout.push(scene::sprite(
+                        pos,
+                        scene::PROP_SIZE,
+                        atlas.props[Prop::Barrel as usize],
+                        [1.3, 1.1, 0.5, 1.0],
+                        0,
+                    ));
                 }
                 EventKind::HealPoint => {
-                    cutout.push(scene::sprite(pos, scene::PROP_SIZE, atlas.props[Prop::Crystal as usize], [0.6, 1.3, 0.7, 1.0], 0));
+                    cutout.push(scene::sprite(
+                        pos,
+                        scene::PROP_SIZE,
+                        atlas.props[Prop::Crystal as usize],
+                        [0.6, 1.3, 0.7, 1.0],
+                        0,
+                    ));
                     lights.push(crate::gfx::renderer::LightSpec {
                         pos: pos + Vec3::Y * 1.0,
                         radius: 3.5,
@@ -268,10 +321,25 @@ impl App {
                 if f.is_player {
                     let dir = dir_frame / CHAR_FRAMES;
                     let frame = dir_frame % CHAR_FRAMES;
-                    scene::char_sprites(atlas, f.sprite as usize, dir, frame, f.pos, tint, &mut cutout, &mut blend);
+                    scene::char_sprites(
+                        atlas,
+                        f.sprite as usize,
+                        dir,
+                        frame,
+                        f.pos,
+                        tint,
+                        &mut cutout,
+                        &mut blend,
+                    );
                 } else {
                     let uv = atlas.enemies[f.sprite as usize % atlas.enemies.len()];
-                    cutout.push(scene::sprite(f.pos + Vec3::Y * 0.02, [1.5, 1.5], uv, tint, 0));
+                    cutout.push(scene::sprite(
+                        f.pos + Vec3::Y * 0.02,
+                        [1.5, 1.5],
+                        uv,
+                        tint,
+                        0,
+                    ));
                     blend.push(scene::sprite(
                         f.pos + Vec3::Y * 0.015,
                         [1.1, 0.6],
@@ -291,7 +359,16 @@ impl App {
                 } else {
                     1
                 };
-                scene::char_sprites(atlas, npc.sprite as usize, npc.dir, frame, pos, [1.0; 4], &mut cutout, &mut blend);
+                scene::char_sprites(
+                    atlas,
+                    npc.sprite as usize,
+                    npc.dir,
+                    frame,
+                    pos,
+                    [1.0; 4],
+                    &mut cutout,
+                    &mut blend,
+                );
             }
             // Player.
             let frame = if game.player.moving {
@@ -324,10 +401,13 @@ impl App {
             blend,
             game.post,
         );
-        ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(
-            rect,
-            Hd2dCallback { input: Arc::new(input) },
-        ));
+        ui.painter()
+            .add(eframe::egui_wgpu::Callback::new_paint_callback(
+                rect,
+                Hd2dCallback {
+                    input: Arc::new(input),
+                },
+            ));
 
         // Damage popups projected onto the viewport.
         if let Some(battle) = &game.battle {
@@ -376,7 +456,9 @@ impl App {
     fn dialogue_ui(&mut self, ctx: &egui::Context) {
         let lang = self.project.system.language;
         let Some(game) = &mut self.game else { return };
-        let Some(dialogue) = &mut game.dialogue else { return };
+        let Some(dialogue) = &mut game.dialogue else {
+            return;
+        };
         let mut close = false;
         let mut send: Option<String> = None;
 
@@ -397,7 +479,11 @@ impl App {
                 let text = if dialogue.text.is_empty() && dialogue.streaming {
                     "…".to_string()
                 } else {
-                    format!("{}{}", dialogue.text, if dialogue.streaming { " ▌" } else { "" })
+                    format!(
+                        "{}{}",
+                        dialogue.text,
+                        if dialogue.streaming { " ▌" } else { "" }
+                    )
                 };
                 ui.label(egui::RichText::new(text).size(15.0));
                 ui.add_space(6.0);
@@ -410,9 +496,15 @@ impl App {
                         let enter = editing.response.lost_focus()
                             && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         let clicked = ui
-                            .add_enabled(!dialogue.streaming && !chat.input.trim().is_empty(), egui::Button::new(lang.send()))
+                            .add_enabled(
+                                !dialogue.streaming && !chat.input.trim().is_empty(),
+                                egui::Button::new(lang.send()),
+                            )
                             .clicked();
-                        if (enter || clicked) && !dialogue.streaming && !chat.input.trim().is_empty() {
+                        if (enter || clicked)
+                            && !dialogue.streaming
+                            && !chat.input.trim().is_empty()
+                        {
                             send = Some(chat.input.trim().to_string());
                             chat.input.clear();
                         }
@@ -440,11 +532,18 @@ impl App {
 
         if let Some(line) = send {
             let location = game.map.name.clone();
-            let player_name = game.party.first().map(|m| m.name.clone()).unwrap_or("the hero".into());
+            let player_name = game
+                .party
+                .first()
+                .map(|m| m.name.clone())
+                .unwrap_or("the hero".into());
             if let Some(d) = &mut game.dialogue {
                 if let Some(chat) = &mut d.chat {
                     // NPC's streamed reply was appended to history on Done; add the player's line.
-                    chat.history.push(ChatTurn { from_player: true, text: line });
+                    chat.history.push(ChatTurn {
+                        from_player: true,
+                        text: line,
+                    });
                     let req = crate::llm::ChatRequest {
                         id: 0,
                         persona: chat.persona.clone(),

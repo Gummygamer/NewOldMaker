@@ -39,7 +39,7 @@ impl Language {
     // -- Fixed strings (pick per language) --------------------------------
 
     /// `en` when English, `pt` otherwise. Keeps the call sites terse.
-    fn pick(self, en: &'static str, pt: &'static str) -> &'static str {
+    pub fn pick(self, en: &'static str, pt: &'static str) -> &'static str {
         match self {
             Language::English => en,
             Language::Portuguese => pt,

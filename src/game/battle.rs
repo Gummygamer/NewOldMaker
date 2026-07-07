@@ -94,8 +94,14 @@ pub enum Menu {
 
 pub enum Phase {
     Intro(f32),
-    Choose { fighter: usize, menu: Menu, boost: i32 },
-    Anim { timer: f32 },
+    Choose {
+        fighter: usize,
+        menu: Menu,
+        boost: i32,
+    },
+    Anim {
+        timer: f32,
+    },
     Finished(OutcomeKind, f32),
 }
 
@@ -139,7 +145,9 @@ impl Battle {
         let mut fighters = Vec::new();
         let n_e = troop.members.len().max(1) as f32;
         for (i, enemy_id) in troop.members.iter().enumerate() {
-            let Some(e) = project.enemy(*enemy_id) else { continue };
+            let Some(e) = project.enemy(*enemy_id) else {
+                continue;
+            };
             let z = cz + (i as f32 - (n_e - 1.0) / 2.0) * 1.6;
             let x = cx - 2.4 - (i as f32 % 2.0) * 0.7;
             fighters.push(Fighter {
@@ -227,7 +235,9 @@ impl Battle {
     }
 
     fn compute_order(&mut self) {
-        let mut idx: Vec<usize> = (0..self.fighters.len()).filter(|i| self.fighters[*i].alive()).collect();
+        let mut idx: Vec<usize> = (0..self.fighters.len())
+            .filter(|i| self.fighters[*i].alive())
+            .collect();
         idx.sort_by_key(|i| -(self.fighters[*i].max.spd));
         self.order = idx;
         self.order_pos = 0;
@@ -260,7 +270,11 @@ impl Battle {
             }
             if self.fighters[fi].is_player {
                 self.fighters[fi].defending = false;
-                self.phase = Phase::Choose { fighter: fi, menu: Menu::Root, boost: 0 };
+                self.phase = Phase::Choose {
+                    fighter: fi,
+                    menu: Menu::Root,
+                    boost: 0,
+                };
                 return;
             }
             // Enemy turn.
@@ -306,14 +320,28 @@ impl Battle {
     }
 
     fn popup(&mut self, at: Vec3, text: String, color: [f32; 3]) {
-        self.popups.push(Popup { pos: at + Vec3::Y * 1.4, text, color, age: 0.0 });
+        self.popups.push(Popup {
+            pos: at + Vec3::Y * 1.4,
+            text,
+            color,
+            age: 0.0,
+        });
     }
 
     // -----------------------------------------------------------------
     // Executing actions
     // -----------------------------------------------------------------
 
-    fn deal_damage(&mut self, project: &ProjectData, src: usize, dst: usize, element: Element, power: f32, hits: u32, boost: i32) {
+    fn deal_damage(
+        &mut self,
+        project: &ProjectData,
+        src: usize,
+        dst: usize,
+        element: Element,
+        power: f32,
+        hits: u32,
+        boost: i32,
+    ) {
         let lang = project.system.language;
         let mut rng = rand::rng();
         let physical = element.physical();
@@ -344,19 +372,31 @@ impl Battle {
             let dmg = dmg.round() as i32;
             self.fighters[dst].hp = (self.fighters[dst].hp - dmg).max(0);
             self.fighters[dst].flash = 0.25;
-            let color = if weak { [1.0, 0.85, 0.2] } else { [1.0, 1.0, 1.0] };
+            let color = if weak {
+                [1.0, 0.85, 0.2]
+            } else {
+                [1.0, 1.0, 1.0]
+            };
             let pos = self.fighters[dst].pos;
             self.popup(pos, format!("{dmg}"), color);
 
             // Shields chip on weakness hits.
-            if weak && !self.fighters[dst].is_player && self.fighters[dst].broken == 0 && self.fighters[dst].shields_max > 0 {
+            if weak
+                && !self.fighters[dst].is_player
+                && self.fighters[dst].broken == 0
+                && self.fighters[dst].shields_max > 0
+            {
                 let s = self.fighters[dst].shields.saturating_sub(1);
                 self.fighters[dst].shields = s;
                 if s == 0 {
                     self.fighters[dst].broken = 2;
                     broke = true;
                     let pos = self.fighters[dst].pos;
-                    self.popup(pos + Vec3::Y * 0.5, lang.break_popup().into(), [1.0, 0.4, 0.2]);
+                    self.popup(
+                        pos + Vec3::Y * 0.5,
+                        lang.break_popup().into(),
+                        [1.0, 0.4, 0.2],
+                    );
                     let name = self.fighters[dst].name.clone();
                     self.log_line(lang.guard_broken(&name));
                 }
@@ -389,7 +429,14 @@ impl Battle {
         audio::sfx(Sfx::Heal);
     }
 
-    pub fn execute_player_action(&mut self, project: &ProjectData, fighter: usize, action: ActionKind, target: Option<usize>, boost: i32) {
+    pub fn execute_player_action(
+        &mut self,
+        project: &ProjectData,
+        fighter: usize,
+        action: ActionKind,
+        target: Option<usize>,
+        boost: i32,
+    ) {
         audio::sfx(Sfx::Confirm);
         let lang = project.system.language;
         let boost = boost.min(self.fighters[fighter].bp).max(0);
@@ -453,7 +500,12 @@ impl Battle {
                     .filter(|f| f.is_player && f.alive())
                     .map(|f| f.max.spd as f32)
                     .sum::<f32>()
-                    / self.fighters.iter().filter(|f| f.is_player && f.alive()).count().max(1) as f32;
+                    / self
+                        .fighters
+                        .iter()
+                        .filter(|f| f.is_player && f.alive())
+                        .count()
+                        .max(1) as f32;
                 let chance = (0.5 + (party_spd - self.avg_enemy_spd) * 0.02).clamp(0.15, 0.95);
                 if rand::rng().random_range(0.0..1.0) < chance {
                     self.log_line(lang.got_away().into());
@@ -466,7 +518,14 @@ impl Battle {
         self.phase = Phase::Anim { timer: 0.7 };
     }
 
-    fn apply_skill(&mut self, project: &ProjectData, src: usize, skill: &Skill, target: Option<usize>, boost: i32) {
+    fn apply_skill(
+        &mut self,
+        project: &ProjectData,
+        src: usize,
+        skill: &Skill,
+        target: Option<usize>,
+        boost: i32,
+    ) {
         let src_is_player = self.fighters[src].is_player;
         let enemies: Vec<usize> = (0..self.fighters.len())
             .filter(|i| self.fighters[*i].is_player != src_is_player && self.fighters[*i].alive())
@@ -484,11 +543,20 @@ impl Battle {
         for t in targets {
             match skill.effect {
                 SkillEffect::Damage => {
-                    self.deal_damage(project, src, t, skill.element, skill.power, skill.hits as u32, boost);
+                    self.deal_damage(
+                        project,
+                        src,
+                        t,
+                        skill.element,
+                        skill.power,
+                        skill.hits as u32,
+                        boost,
+                    );
                 }
                 SkillEffect::Heal => {
                     let m = self.fighters[src].atk_stat(false);
-                    let amount = (m * 1.8 * skill.power * (1.0 + 0.5 * boost as f32)).round() as i32;
+                    let amount =
+                        (m * 1.8 * skill.power * (1.0 + 0.5 * boost as f32)).round() as i32;
                     self.heal(t, amount);
                 }
                 SkillEffect::BuffAttack(turns) => {
@@ -498,7 +566,15 @@ impl Battle {
                 }
                 SkillEffect::BreakDefense(turns) => {
                     if skill.power > 0.0 {
-                        self.deal_damage(project, src, t, skill.element, skill.power, skill.hits as u32, boost);
+                        self.deal_damage(
+                            project,
+                            src,
+                            t,
+                            skill.element,
+                            skill.power,
+                            skill.hits as u32,
+                            boost,
+                        );
                     }
                     self.fighters[t].debuff_def = turns + boost as u8;
                     let pos = self.fighters[t].pos;
@@ -586,7 +662,13 @@ impl Battle {
     }
 
     /// Write battle results back into the party; returns the final outcome.
-    pub fn settle(&self, party: &mut [Member], project: &ProjectData, kind: OutcomeKind, inventory: &mut Vec<(u32, u32)>) -> Outcome {
+    pub fn settle(
+        &self,
+        party: &mut [Member],
+        project: &ProjectData,
+        kind: OutcomeKind,
+        inventory: &mut Vec<(u32, u32)>,
+    ) -> Outcome {
         *inventory = self.inventory.clone();
         for f in &self.fighters {
             if let Some(i) = f.member_idx {
@@ -598,7 +680,12 @@ impl Battle {
         }
         match kind {
             OutcomeKind::Victory => {
-                let exp: u32 = self.fighters.iter().filter(|f| !f.is_player).map(|f| f.exp).sum();
+                let exp: u32 = self
+                    .fighters
+                    .iter()
+                    .filter(|f| !f.is_player)
+                    .map(|f| f.exp)
+                    .sum();
                 let mut messages = Vec::new();
                 for m in party.iter_mut() {
                     if m.hp <= 0 {
@@ -660,7 +747,11 @@ impl Battle {
                         }
                     });
                     let frac = f.hp as f32 / f.max.hp.max(1) as f32;
-                    ui.add(egui::ProgressBar::new(frac).desired_width(140.0).desired_height(6.0));
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .desired_width(140.0)
+                            .desired_height(6.0),
+                    );
                 }
                 ui.small(lang.round(self.round));
                 for line in &self.log {
@@ -844,8 +935,21 @@ impl Battle {
             } else if !f.alive() {
                 tint = [0.35, 0.3, 0.4, 1.0];
             }
-            let frame = if f.is_player { ((time * 2.0) as u32 + i as u32) % 3 } else { 0 };
-            out.push((i, f, tint, if f.is_player { DIR_LEFT * 3 + frame } else { frame }));
+            let frame = if f.is_player {
+                ((time * 2.0) as u32 + i as u32) % 3
+            } else {
+                0
+            };
+            out.push((
+                i,
+                f,
+                tint,
+                if f.is_player {
+                    DIR_LEFT * 3 + frame
+                } else {
+                    frame
+                },
+            ));
         }
         out
     }
@@ -858,21 +962,25 @@ mod tests {
     use crate::game::Game;
 
     fn setup(troop: u32) -> (ProjectData, Battle) {
-        let project = default_project();
+        let project = default_project(Language::default());
         let game = Game::new(&project);
         let battle = Battle::new(&project, &game, troop).expect("troop exists");
         (project, battle)
     }
 
     fn first_alive_enemy(b: &Battle) -> usize {
-        (0..b.fighters.len()).find(|i| !b.fighters[*i].is_player && b.fighters[*i].alive()).unwrap()
+        (0..b.fighters.len())
+            .find(|i| !b.fighters[*i].is_player && b.fighters[*i].alive())
+            .unwrap()
     }
 
     #[test]
     fn weakness_hits_chip_shields_and_break() {
         let (project, mut b) = setup(1); // slimes: shields 2, weak to Slash/Fire
         let e = first_alive_enemy(&b);
-        let p = (0..b.fighters.len()).find(|i| b.fighters[*i].is_player).unwrap();
+        let p = (0..b.fighters.len())
+            .find(|i| b.fighters[*i].is_player)
+            .unwrap();
         assert_eq!(b.fighters[e].shields, 2);
         // Slash attack (weakness) chips one shield per hit.
         b.deal_damage(&project, p, e, Element::Slash, 0.01, 1, 0);
@@ -883,7 +991,9 @@ mod tests {
         // Non-weakness element must not chip shields on a fresh enemy.
         let (project2, mut b2) = setup(1);
         let e2 = first_alive_enemy(&b2);
-        let p2 = (0..b2.fighters.len()).find(|i| b2.fighters[*i].is_player).unwrap();
+        let p2 = (0..b2.fighters.len())
+            .find(|i| b2.fighters[*i].is_player)
+            .unwrap();
         b2.deal_damage(&project2, p2, e2, Element::Ice, 0.01, 1, 0);
         assert_eq!(b2.fighters[e2].shields, 2);
     }
@@ -892,7 +1002,9 @@ mod tests {
     fn broken_enemies_take_bonus_damage() {
         let (project, mut b) = setup(4); // golem, high HP
         let e = first_alive_enemy(&b);
-        let p = (0..b.fighters.len()).find(|i| b.fighters[*i].is_player).unwrap();
+        let p = (0..b.fighters.len())
+            .find(|i| b.fighters[*i].is_player)
+            .unwrap();
         // Sample damage many times before/after break to smooth variance.
         let sample = |b: &mut Battle, project: &ProjectData| -> f32 {
             let mut total = 0.0;
@@ -907,16 +1019,25 @@ mod tests {
         let normal = sample(&mut b, &project);
         b.fighters[e].broken = 2;
         let broken = sample(&mut b, &project);
-        assert!(broken > normal * 1.3, "break should amplify damage: {normal} -> {broken}");
+        assert!(
+            broken > normal * 1.3,
+            "break should amplify damage: {normal} -> {broken}"
+        );
     }
 
     #[test]
     fn boost_spends_bp_and_amplifies() {
         let (project, mut b) = setup(4);
         let e = first_alive_enemy(&b);
-        let p = (0..b.fighters.len()).find(|i| b.fighters[*i].is_player).unwrap();
+        let p = (0..b.fighters.len())
+            .find(|i| b.fighters[*i].is_player)
+            .unwrap();
         b.fighters[p].bp = 3;
-        b.phase = Phase::Choose { fighter: p, menu: Menu::Root, boost: 0 };
+        b.phase = Phase::Choose {
+            fighter: p,
+            menu: Menu::Root,
+            boost: 0,
+        };
         let before = b.fighters[e].hp;
         b.execute_player_action(&project, p, ActionKind::Attack, Some(e), 3);
         assert_eq!(b.fighters[p].bp, 0, "boost must spend BP");
@@ -927,7 +1048,9 @@ mod tests {
     #[test]
     fn bp_banks_each_round() {
         let (_project, mut b) = setup(1);
-        let p = (0..b.fighters.len()).find(|i| b.fighters[*i].is_player).unwrap();
+        let p = (0..b.fighters.len())
+            .find(|i| b.fighters[*i].is_player)
+            .unwrap();
         let start = b.fighters[p].bp;
         b.end_round();
         assert_eq!(b.fighters[p].bp, start + 1);
@@ -940,7 +1063,7 @@ mod tests {
     #[test]
     fn full_battle_reaches_victory_and_grants_exp() {
         let (project, mut b) = setup(1);
-        let mut party: Vec<Member> = default_project()
+        let mut party: Vec<Member> = default_project(Language::default())
             .system
             .party
             .iter()
@@ -983,7 +1106,9 @@ mod tests {
     #[test]
     fn healing_never_exceeds_max_and_skips_dead() {
         let (_project, mut b) = setup(1);
-        let p = (0..b.fighters.len()).find(|i| b.fighters[*i].is_player).unwrap();
+        let p = (0..b.fighters.len())
+            .find(|i| b.fighters[*i].is_player)
+            .unwrap();
         b.fighters[p].hp = b.fighters[p].max.hp - 5;
         b.heal(p, 9999);
         assert_eq!(b.fighters[p].hp, b.fighters[p].max.hp);

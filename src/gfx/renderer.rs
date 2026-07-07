@@ -125,7 +125,7 @@ struct Targets {
     bg_blur_v1: wgpu::BindGroup,    // src = half_b
     bg_blur_h2: wgpu::BindGroup,
     bg_blur_v2: wgpu::BindGroup,
-    bg_composite: wgpu::BindGroup,  // src = hdr, aux = half_a
+    bg_composite: wgpu::BindGroup, // src = hdr, aux = half_a
 }
 
 pub struct Hd2dRenderer {
@@ -162,7 +162,11 @@ struct GrowBuffer {
 
 impl GrowBuffer {
     fn new(label: &'static str) -> Self {
-        GrowBuffer { buf: None, capacity: 0, label }
+        GrowBuffer {
+            buf: None,
+            capacity: 0,
+            label,
+        }
     }
     fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, data: &[u8]) {
         let needed = data.len() as u64;
@@ -197,7 +201,11 @@ impl Hd2dRenderer {
         // Atlas texture.
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("nom-atlas"),
-            size: wgpu::Extent3d { width: ATLAS_W, height: ATLAS_H, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: ATLAS_W,
+                height: ATLAS_H,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -218,7 +226,11 @@ impl Hd2dRenderer {
                 bytes_per_row: Some(ATLAS_W * 4),
                 rows_per_image: Some(ATLAS_H),
             },
-            wgpu::Extent3d { width: ATLAS_W, height: ATLAS_H, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: ATLAS_W,
+                height: ATLAS_H,
+                depth_or_array_layers: 1,
+            },
         );
         let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -284,9 +296,18 @@ impl Hd2dRenderer {
             label: Some("nom-scene-bg"),
             layout: &scene_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: scene_ub.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&nearest_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: scene_ub.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&nearest_sampler),
+                },
             ],
         });
 
@@ -428,7 +449,10 @@ impl Hd2dRenderer {
                 compilation_options: Default::default(),
                 targets: &[hdr_target(None)],
             }),
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
             depth_stencil: Some(depth_write(true)),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -450,7 +474,10 @@ impl Hd2dRenderer {
                 compilation_options: Default::default(),
                 targets: &[hdr_target(Some(wgpu::BlendState::ALPHA_BLENDING))],
             }),
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
             depth_stencil: Some(depth_write(false)),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -526,12 +553,17 @@ impl Hd2dRenderer {
         let mk_tex = |label: &str, w: u32, h: u32, format: wgpu::TextureFormat| {
             let tex = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             tex.create_view(&wgpu::TextureViewDescriptor::default())
@@ -555,18 +587,31 @@ impl Hd2dRenderer {
             queue.write_buffer(&self.post_blur_ubs[i], 0, bytemuck::bytes_of(&u));
         }
 
-        let mk_bg = |label: &str, ub: &wgpu::Buffer, src: &wgpu::TextureView, aux: &wgpu::TextureView| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &self.post_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(aux) },
-                ],
-            })
-        };
+        let mk_bg =
+            |label: &str, ub: &wgpu::Buffer, src: &wgpu::TextureView, aux: &wgpu::TextureView| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &self.post_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: ub.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(src),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(aux),
+                        },
+                    ],
+                })
+            };
 
         // The aux slot is unused outside the composite pass; bind the HDR view
         // (never a post-pass render target) so usages don't conflict.
@@ -575,7 +620,12 @@ impl Hd2dRenderer {
         let bg_blur_v1 = mk_bg("nom-bg-v1", &self.post_blur_ubs[2], &half_b_view, &hdr_view);
         let bg_blur_h2 = mk_bg("nom-bg-h2", &self.post_blur_ubs[3], &half_a_view, &hdr_view);
         let bg_blur_v2 = mk_bg("nom-bg-v2", &self.post_blur_ubs[4], &half_b_view, &hdr_view);
-        let bg_composite = mk_bg("nom-bg-composite", &self.post_composite_ub, &hdr_view, &half_a_view);
+        let bg_composite = mk_bg(
+            "nom-bg-composite",
+            &self.post_composite_ub,
+            &hdr_view,
+            &half_a_view,
+        );
 
         self.targets = Some(Targets {
             size,
@@ -601,7 +651,8 @@ impl Hd2dRenderer {
         let ibytes: &[u8] = bytemuck::cast_slice(&indices);
         let need_v = vbytes.len() as u64;
         let need_i = ibytes.len() as u64;
-        let cap_ok = |b: &Option<wgpu::Buffer>, need: u64| b.as_ref().is_some_and(|b| b.size() >= need);
+        let cap_ok =
+            |b: &Option<wgpu::Buffer>, need: u64| b.as_ref().is_some_and(|b| b.size() >= need);
         if !cap_ok(&self.terrain_vbuf, need_v) {
             self.terrain_vbuf = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("nom-terrain-v"),
@@ -625,7 +676,10 @@ impl Hd2dRenderer {
     }
 
     fn write_uniforms(&self, queue: &wgpu::Queue, input: &FrameInput) {
-        let mut lights = [LightRaw { pos_radius: [0.0; 4], color: [0.0; 4] }; MAX_LIGHTS];
+        let mut lights = [LightRaw {
+            pos_radius: [0.0; 4],
+            color: [0.0; 4],
+        }; MAX_LIGHTS];
         let count = input.lights.len().min(MAX_LIGHTS);
         for (i, l) in input.lights.iter().take(MAX_LIGHTS).enumerate() {
             lights[i] = LightRaw {
@@ -638,7 +692,12 @@ impl Hd2dRenderer {
             cam_pos: [input.cam_pos.x, input.cam_pos.y, input.cam_pos.z, 0.0],
             cam_right: [input.cam_right.x, input.cam_right.y, input.cam_right.z, 0.0],
             sun_dir: [input.sun_dir.x, input.sun_dir.y, input.sun_dir.z, 0.0],
-            sun_color: [input.sun_color[0], input.sun_color[1], input.sun_color[2], 0.0],
+            sun_color: [
+                input.sun_color[0],
+                input.sun_color[1],
+                input.sun_color[2],
+                0.0,
+            ],
             ambient: [input.ambient[0], input.ambient[1], input.ambient[2], 0.0],
             fog_color_density: [
                 input.fog_color[0],
@@ -654,8 +713,18 @@ impl Hd2dRenderer {
 
         let p = input.post;
         let comp = PostUniforms {
-            a: [p.bloom_strength, p.bloom_threshold, p.focus_y, p.dof_strength],
-            b: [p.vignette, p.exposure, p.saturation, if self.target_is_srgb { 1.0 } else { 2.0 }],
+            a: [
+                p.bloom_strength,
+                p.bloom_threshold,
+                p.focus_y,
+                p.dof_strength,
+            ],
+            b: [
+                p.vignette,
+                p.exposure,
+                p.saturation,
+                if self.target_is_srgb { 1.0 } else { 2.0 },
+            ],
             c: [0.0, 0.0, 0.0, input.time],
         };
         queue.write_buffer(&self.post_composite_ub, 0, bytemuck::bytes_of(&comp));
@@ -698,7 +767,10 @@ impl Hd2dRenderer {
             if self.terrain_index_count > 0 {
                 pass.set_pipeline(&self.pipe_terrain);
                 pass.set_vertex_buffer(0, self.terrain_vbuf.as_ref().unwrap().slice(..));
-                pass.set_index_buffer(self.terrain_ibuf.as_ref().unwrap().slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_index_buffer(
+                    self.terrain_ibuf.as_ref().unwrap().slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
                 pass.draw_indexed(0..self.terrain_index_count, 0, 0..1);
             }
             if !input.sprites_cutout.is_empty() {
@@ -719,9 +791,9 @@ impl Hd2dRenderer {
 
         // --- Post chain: downsample + two blur iterations ---
         let post_pass = |encoder: &mut wgpu::CommandEncoder,
-                             target: &wgpu::TextureView,
-                             pipe: &wgpu::RenderPipeline,
-                             bg: &wgpu::BindGroup| {
+                         target: &wgpu::TextureView,
+                         pipe: &wgpu::RenderPipeline,
+                         bg: &wgpu::BindGroup| {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("nom-post"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -743,7 +815,12 @@ impl Hd2dRenderer {
             pass.draw(0..3, 0..1);
         };
 
-        post_pass(encoder, &t.half_a_view, &self.pipe_downsample, &t.bg_downsample);
+        post_pass(
+            encoder,
+            &t.half_a_view,
+            &self.pipe_downsample,
+            &t.bg_downsample,
+        );
         post_pass(encoder, &t.half_b_view, &self.pipe_blur_h, &t.bg_blur_h1);
         post_pass(encoder, &t.half_a_view, &self.pipe_blur_v, &t.bg_blur_v1);
         post_pass(encoder, &t.half_b_view, &self.pipe_blur_h, &t.bg_blur_h2);
@@ -801,11 +878,13 @@ mod tests {
     #[test]
     fn shader_and_pipelines_build() {
         let instance = wgpu::Instance::default();
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-        })) else {
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            }))
+        else {
             eprintln!("no GPU adapter available; skipping");
             return;
         };
@@ -815,7 +894,10 @@ mod tests {
         let atlas = Arc::new(crate::gfx::pixelart::build_atlas());
         let mut r = Hd2dRenderer::new(&device, &queue, wgpu::TextureFormat::Bgra8UnormSrgb, atlas);
         r.ensure_targets(&device, &queue, [320, 200]);
-        let map = Arc::new(crate::core::defaults::default_project().maps[0].clone());
+        let map = Arc::new(
+            crate::core::defaults::default_project(crate::core::data::Language::default()).maps[0]
+                .clone(),
+        );
         let input = FrameInput {
             view_proj: Mat4::IDENTITY,
             cam_pos: Vec3::ZERO,
@@ -840,6 +922,11 @@ mod tests {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         r.encode(&mut encoder, &input);
         queue.submit([encoder.finish()]);
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
     }
 }
