@@ -36,21 +36,27 @@ required — all placeholder pixel art is generated procedurally at startup.
 **LLM NPC dialogue**
 - Each NPC has a *persona*: role, personality, knowledge, hard constraints,
   and scripted fallback lines
-- With a GGUF model configured, talking to an NPC opens a free-form chat —
-  type anything, the NPC answers in character, streamed token by token,
-  entirely on-CPU and offline
-- Without a model (or with `use_llm` off) NPCs cycle their fallback lines
+- Two interchangeable backends drive the chat (Database → LLM → Backend):
+  - **Local** — a llama.cpp GGUF model, streamed token by token entirely
+    on-CPU and offline
+  - **NVIDIA NIM** — a hosted, OpenAI-compatible cloud endpoint, driven by
+    your NVIDIA API key (no local model needed)
+- With a backend configured, talking to an NPC opens a free-form chat — type
+  anything and the NPC answers in character, streamed as it generates
+- Without a backend (or with `use_llm` off) NPCs cycle their fallback lines
 
 ## Building
 
 ```sh
-cargo build --release              # full engine incl. local LLM
-cargo build --release --no-default-features   # skip llama.cpp (no LLM)
+cargo build --release              # full engine (local llama.cpp + NIM)
+cargo build --release --no-default-features --features nim   # NIM only, no llama.cpp
+cargo build --release --no-default-features   # no LLM at all (fallback lines)
 cargo run --release
 ```
 
 Requirements: Rust 1.85+, a Vulkan/Metal/DX12-capable GPU, and for the `llm`
-feature a C/C++ toolchain + cmake + libclang (used to build llama.cpp).
+feature a C/C++ toolchain + cmake + libclang (used to build llama.cpp). The
+`nim` feature only needs network access at runtime.
 
 > Note: `.cargo/config.toml` sets `BINDGEN_EXTRA_CLANG_ARGS` to gcc's include
 > dir because this machine has libclang without clang's resource headers.
@@ -66,6 +72,21 @@ Then in the engine: **Database → LLM → Model (.gguf)** and pick the file.
 The menu bar shows `LLM: <model>` in green when it's ready. Any small
 instruct-tuned GGUF works; 0.3–1.5 B models are the sweet spot for
 low-latency village chatter.
+
+## Using NVIDIA NIM instead
+
+To let NPCs talk through NVIDIA's hosted models rather than a local one, set
+**Database → LLM → Backend** to *NVIDIA NIM* and fill in:
+
+- **API key** — your `nvapi-…` key. Leave it blank to read the
+  `NVIDIA_API_KEY` environment variable instead (handy for not saving the key
+  into the project file).
+- **Model** — e.g. `meta/llama-3.1-8b-instruct`.
+- **Base URL** — defaults to `https://integrate.api.nvidia.com/v1`; point it
+  at a self-hosted NIM container if you run one.
+
+The endpoint is OpenAI-compatible, so replies stream in exactly as they do for
+the local backend, through the same in-character prompt and markup filter.
 
 ## Quick tour
 

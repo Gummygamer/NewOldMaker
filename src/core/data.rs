@@ -142,7 +142,11 @@ pub struct Tile {
 
 impl Default for Tile {
     fn default() -> Self {
-        Tile { terrain: Terrain::Grass as u8, height: 1, prop: 0 }
+        Tile {
+            terrain: Terrain::Grass as u8,
+            height: 1,
+            prop: 0,
+        }
     }
 }
 
@@ -209,7 +213,11 @@ impl MapData {
         if self.in_bounds(x, y) {
             self.tiles[(y as u32 * self.width + x as u32) as usize]
         } else {
-            Tile { terrain: Terrain::Water as u8, height: 0, prop: 0 }
+            Tile {
+                terrain: Terrain::Water as u8,
+                height: 0,
+                prop: 0,
+            }
         }
     }
     pub fn tile_mut(&mut self, x: i32, y: i32) -> Option<&mut Tile> {
@@ -242,11 +250,19 @@ pub struct EventData {
 pub enum EventKind {
     /// A talking NPC. Dialogue comes from the local LLM when available,
     /// otherwise cycles through the persona's fallback lines.
-    Npc { sprite: u8, persona: NpcPersona, wander: bool },
+    Npc {
+        sprite: u8,
+        persona: NpcPersona,
+        wander: bool,
+    },
     /// A readable sign.
     Sign { text: String },
     /// Steps onto this tile move the player elsewhere.
-    Transfer { target_map: u32, target_x: i32, target_y: i32 },
+    Transfer {
+        target_map: u32,
+        target_x: i32,
+        target_y: i32,
+    },
     /// One-shot item pickup.
     Chest { item_id: u32 },
     /// Touching this tile starts a fixed battle. `once` = disappears after victory.
@@ -267,7 +283,10 @@ impl EventKind {
         }
     }
     pub fn blocks(&self) -> bool {
-        !matches!(self, EventKind::Transfer { .. } | EventKind::BattleTrigger { .. })
+        !matches!(
+            self,
+            EventKind::Transfer { .. } | EventKind::BattleTrigger { .. }
+        )
     }
 }
 
@@ -477,25 +496,86 @@ pub struct SystemData {
     pub start_items: Vec<(u32, u32)>,
 }
 
+/// Which engine drives NPC dialogue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LlmBackend {
+    /// Local llama.cpp model loaded from a GGUF file (fully offline).
+    #[default]
+    Local,
+    /// NVIDIA NIM cloud endpoint (OpenAI-compatible), driven by an API key.
+    Nim,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LlmSettings {
-    /// Path to a GGUF model file. Empty = LLM disabled, fallback lines used.
+    /// Which backend serves NPC dialogue.
+    #[serde(default)]
+    pub backend: LlmBackend,
+    /// Path to a GGUF model file (local backend). Empty = LLM disabled.
     pub model_path: String,
     pub context_tokens: u32,
     pub max_reply_tokens: u32,
     pub temperature: f32,
-    /// Number of CPU threads (0 = auto).
+    /// Number of CPU threads (0 = auto), local backend only.
     pub threads: u32,
+    /// NVIDIA API key for the NIM backend. Empty = fall back to the
+    /// `NVIDIA_API_KEY` environment variable.
+    #[serde(default)]
+    pub nim_api_key: String,
+    /// NIM model id, e.g. "meta/llama-3.1-8b-instruct".
+    #[serde(default = "default_nim_model")]
+    pub nim_model: String,
+    /// NIM OpenAI-compatible base URL (no trailing slash).
+    #[serde(default = "default_nim_base_url")]
+    pub nim_base_url: String,
+}
+
+fn default_nim_model() -> String {
+    "meta/llama-3.1-8b-instruct".into()
+}
+
+fn default_nim_base_url() -> String {
+    "https://integrate.api.nvidia.com/v1".into()
 }
 
 impl Default for LlmSettings {
     fn default() -> Self {
         LlmSettings {
+            backend: LlmBackend::Local,
             model_path: String::new(),
             context_tokens: 2048,
             max_reply_tokens: 96,
             temperature: 0.8,
             threads: 0,
+            nim_api_key: String::new(),
+            nim_model: default_nim_model(),
+            nim_base_url: default_nim_base_url(),
+        }
+    }
+}
+
+impl LlmSettings {
+    /// A signature that changes whenever the active worker must be rebuilt.
+    /// Switching backend, model, endpoint, or key reloads; per-chat knobs
+    /// (temperature, reply length) are carried on each request instead.
+    pub fn worker_signature(&self) -> String {
+        match self.backend {
+            LlmBackend::Local => format!("local\u{1}{}", self.model_path),
+            LlmBackend::Nim => format!(
+                "nim\u{1}{}\u{1}{}\u{1}{}",
+                self.nim_base_url, self.nim_model, self.nim_api_key
+            ),
+        }
+    }
+
+    /// Whether the active backend has enough configuration to run at all.
+    pub fn is_configured(&self) -> bool {
+        match self.backend {
+            LlmBackend::Local => !self.model_path.is_empty(),
+            LlmBackend::Nim => {
+                !self.nim_model.is_empty()
+                    && (!self.nim_api_key.is_empty() || std::env::var("NVIDIA_API_KEY").is_ok())
+            }
         }
     }
 }
