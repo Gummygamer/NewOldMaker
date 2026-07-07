@@ -518,7 +518,16 @@ impl Game {
     fn interact(&mut self, project: &ProjectData, llm: &mut LlmEngine) {
         let (dx, dy) = dir_delta(self.player.dir);
         let (tx, ty) = (self.player.x + dx, self.player.y + dy);
-        let Some(ev) = self.map.event_at(tx, ty).cloned() else { return };
+        // Wandering NPCs move off their static event tile, so resolve the event
+        // by the NPC's live runtime position first; otherwise fall back to the
+        // static tile for stationary events (signs, chests, heal points, …).
+        let ev = self
+            .npcs
+            .iter()
+            .find(|n| n.x == tx && n.y == ty)
+            .and_then(|n| self.map.events.iter().find(|e| e.id == n.event_id))
+            .or_else(|| self.map.event_at(tx, ty));
+        let Some(ev) = ev.cloned() else { return };
         match &ev.kind {
             EventKind::Npc { persona, .. } => {
                 // Face the player.
