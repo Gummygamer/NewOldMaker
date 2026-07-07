@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.103"
 bytemuck = { version = "1.25.0", features = ["derive"] }
+cpal = { version = "0.18.1", optional = true }
 eframe = { version = "0.35.0", features = ["wgpu"] }
 encoding_rs = "0.8.35"
 glam = "0.33.2"
@@ -16,8 +17,9 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 
 [features]
-default = ["llm"]
+default = ["llm", "audio"]
 llm = ["dep:llama-cpp-2"]
+audio = ["dep:cpal"]
 
 [profile.dev]
 opt-level = 1

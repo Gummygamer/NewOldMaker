@@ -9,6 +9,7 @@ use eframe::egui;
 use glam::Vec3;
 use rand::RngExt;
 
+use crate::audio::{self, Sfx, Track};
 use crate::core::data::*;
 use crate::gfx::camera::OrbitCamera;
 use crate::gfx::mesh::tile_top_y;
@@ -196,6 +197,7 @@ impl Game {
             map,
         };
         game.spawn_npcs();
+        audio::music(Track::for_map(&game.map));
         game
     }
 
@@ -230,6 +232,7 @@ impl Game {
             self.player.move_t = 1.0;
             self.player.moving = false;
             self.spawn_npcs();
+            audio::music(Track::for_map(&self.map));
         }
     }
 
@@ -480,6 +483,7 @@ impl Game {
 
     fn on_step_complete(&mut self, project: &ProjectData) {
         self.steps += 1;
+        audio::sfx(Sfx::Step);
         // Touch events on the tile we arrived at.
         let ev = self.map.event_at(self.player.x, self.player.y).cloned();
         if let Some(ev) = ev {
@@ -526,9 +530,11 @@ impl Game {
                         _ => DIR_LEFT,
                     };
                 }
+                audio::sfx(Sfx::Confirm);
                 self.open_npc_dialogue(project, llm, ev.id, persona.clone());
             }
             EventKind::Sign { text } => {
+                audio::sfx(Sfx::Confirm);
                 self.dialogue = Some(Dialogue {
                     speaker: ev.name.clone(),
                     text: text.clone(),
@@ -539,6 +545,7 @@ impl Game {
             EventKind::Chest { item_id } => {
                 if !self.done_events.contains(&(self.map_id, ev.id)) {
                     self.done_events.insert((self.map_id, ev.id));
+                    audio::sfx(Sfx::Chest);
                     let name = project.item(*item_id).map(|i| i.name.clone()).unwrap_or("???".into());
                     if let Some(slot) = self.inventory.iter_mut().find(|(id, _)| id == item_id) {
                         slot.1 += 1;
@@ -554,6 +561,7 @@ impl Game {
                 }
             }
             EventKind::HealPoint => {
+                audio::sfx(Sfx::Heal);
                 for m in &mut self.party {
                     m.hp = m.max.hp;
                     m.mp = m.max.mp;
@@ -632,13 +640,21 @@ impl Game {
 
     fn start_battle(&mut self, project: &ProjectData, troop_id: u32) {
         if let Some(b) = battle::Battle::new(project, self, troop_id) {
+            audio::sfx(Sfx::Encounter);
+            audio::music(Track::Battle);
             self.battle = Some(b);
         }
     }
 
     fn finish_battle(&mut self, outcome: battle::Outcome) {
+        // Return the field music once combat ends (defeat keeps it silent).
         match outcome {
             battle::Outcome::Victory { exp, messages } => {
+                audio::sfx(Sfx::Victory);
+                if !messages.is_empty() {
+                    audio::sfx(Sfx::LevelUp);
+                }
+                audio::music(Track::for_map(&self.map));
                 self.dialogue = Some(Dialogue {
                     speaker: "".into(),
                     text: format!("Victory! Gained {exp} EXP.{}", if messages.is_empty() {
@@ -651,9 +667,14 @@ impl Game {
                 });
             }
             battle::Outcome::Defeat => {
+                audio::sfx(Sfx::Defeat);
+                audio::music(Track::Silence);
                 self.game_over = true;
             }
-            battle::Outcome::Fled => {}
+            battle::Outcome::Fled => {
+                audio::sfx(Sfx::Flee);
+                audio::music(Track::for_map(&self.map));
+            }
         }
     }
 }

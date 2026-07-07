@@ -38,6 +38,8 @@ pub struct App {
     llm: LlmEngine,
     start: std::time::Instant,
     toast: Option<(String, f32)>,
+    /// Live audio stream; kept alive for the lifetime of the app.
+    _audio: crate::audio::AudioStream,
 }
 
 impl App {
@@ -60,7 +62,14 @@ impl App {
             llm: LlmEngine::new(),
             start: std::time::Instant::now(),
             toast: None,
+            _audio: crate::audio::init(),
         }
+    }
+
+    /// Stop the current playtest and fade the music back to silence.
+    fn stop_game(&mut self) {
+        self.game = None;
+        crate::audio::music(crate::audio::Track::Silence);
     }
 
     fn toast(&mut self, msg: impl Into<String>) {
@@ -101,7 +110,7 @@ impl App {
                     self.project = p;
                     self.project_path = Some(path);
                     self.editor = EditorState::new(&self.project);
-                    self.game = None;
+                    self.stop_game();
                     self.toast("Project loaded");
                 }
                 Err(e) => self.toast(format!("Open failed: {e}")),
@@ -113,7 +122,7 @@ impl App {
         self.project = default_project();
         self.project_path = None;
         self.editor = EditorState::new(&self.project);
-        self.game = None;
+        self.stop_game();
     }
 
     // -----------------------------------------------------------------
@@ -159,9 +168,18 @@ impl App {
                 .button(egui::RichText::new("⏹ Stop  (F5)").color(egui::Color32::from_rgb(240, 120, 100)))
                 .clicked()
             {
-                self.game = None;
+                self.stop_game();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (icon, hint) = if crate::audio::is_muted() {
+                    ("🔇", "Sound off")
+                } else {
+                    ("🔊", "Sound on")
+                };
+                if ui.button(icon).on_hover_text(hint).clicked() {
+                    crate::audio::toggle_muted();
+                }
+                ui.separator();
                 match &self.llm.status {
                     LlmStatus::Off => ui.weak("LLM: off"),
                     LlmStatus::Loading => ui.colored_label(egui::Color32::YELLOW, "LLM: loading…"),
@@ -434,6 +452,7 @@ impl App {
             }
         } else if close {
             game.dialogue = None;
+            crate::audio::sfx(crate::audio::Sfx::Cancel);
         }
     }
 
@@ -454,7 +473,7 @@ impl App {
                 }
             });
         if stop {
-            self.game = None;
+            self.stop_game();
         }
     }
 }
@@ -479,7 +498,7 @@ impl eframe::App for App {
         // Global shortcuts.
         if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
             if self.game.is_some() {
-                self.game = None;
+                self.stop_game();
             } else {
                 self.game = Some(Game::new(&self.project));
             }

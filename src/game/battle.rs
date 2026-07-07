@@ -5,6 +5,7 @@ use eframe::egui;
 use glam::Vec3;
 use rand::RngExt;
 
+use crate::audio::{self, Sfx};
 use crate::core::data::*;
 use crate::game::{exp_to_next, Member, DIR_LEFT};
 use crate::gfx::camera::OrbitCamera;
@@ -316,10 +317,14 @@ impl Battle {
         let _ = project;
         let mut rng = rand::rng();
         let physical = element.physical();
+        let mut hit_any = false;
+        let mut weak_any = false;
+        let mut broke = false;
         for _ in 0..hits {
             if !self.fighters[dst].alive() {
                 break;
             }
+            hit_any = true;
             let a = self.fighters[src].atk_stat(physical);
             let d = self.fighters[dst].def_stat(physical);
             let mut dmg = (a * 2.2 * power - d * 1.15).max(1.0);
@@ -327,6 +332,7 @@ impl Battle {
             let weak = self.fighters[dst].weaknesses.contains(&element);
             if weak {
                 dmg *= 1.3;
+                weak_any = true;
             }
             if self.fighters[dst].broken > 0 {
                 dmg *= 1.5;
@@ -348,6 +354,7 @@ impl Battle {
                 self.fighters[dst].shields = s;
                 if s == 0 {
                     self.fighters[dst].broken = 2;
+                    broke = true;
                     let pos = self.fighters[dst].pos;
                     self.popup(pos + Vec3::Y * 0.5, "BREAK!".into(), [1.0, 0.4, 0.2]);
                     let name = self.fighters[dst].name.clone();
@@ -358,6 +365,15 @@ impl Battle {
                 let name = self.fighters[dst].name.clone();
                 self.log_line(format!("{name} is defeated!"));
             }
+        }
+        // One sound per action: Break trumps a weakness hit, which trumps a
+        // plain hit.
+        if broke {
+            audio::sfx(Sfx::Break);
+        } else if weak_any {
+            audio::sfx(Sfx::Weakness);
+        } else if hit_any {
+            audio::sfx(Sfx::Hit);
         }
     }
 
@@ -370,9 +386,11 @@ impl Battle {
         f.hp = (f.hp + amount).min(f.max.hp);
         let pos = f.pos;
         self.popup(pos, format!("+{amount}"), [0.4, 1.0, 0.5]);
+        audio::sfx(Sfx::Heal);
     }
 
     pub fn execute_player_action(&mut self, project: &ProjectData, fighter: usize, action: ActionKind, target: Option<usize>, boost: i32) {
+        audio::sfx(Sfx::Confirm);
         let boost = boost.min(self.fighters[fighter].bp).max(0);
         self.fighters[fighter].bp -= boost;
         let name = self.fighters[fighter].name.clone();
