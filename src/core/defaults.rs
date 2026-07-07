@@ -20,6 +20,7 @@ pub fn default_project() -> ProjectData {
             start_y: 16,
             party: vec![1, 2, 3, 4],
             start_items: vec![(1, 5), (2, 3), (3, 1)],
+            language: Language::default(),
         },
         llm: LlmSettings::default(),
     }

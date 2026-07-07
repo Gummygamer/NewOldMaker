@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::core::i18n::{Language, ALL_LANGUAGES};
+
 // ---------------------------------------------------------------------------
 // Terrain / props (built-in sets backed by the procedural atlas)
 // ---------------------------------------------------------------------------
@@ -494,6 +496,9 @@ pub struct SystemData {
     /// Actor ids in the starting party (max 4).
     pub party: Vec<u32>,
     pub start_items: Vec<(u32, u32)>,
+    /// Language the game is played in (in-game text + NPC dialogue).
+    #[serde(default)]
+    pub language: Language,
 }
 
 /// Which engine drives NPC dialogue.

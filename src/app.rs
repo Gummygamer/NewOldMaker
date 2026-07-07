@@ -180,6 +180,17 @@ impl App {
                     crate::audio::toggle_muted();
                 }
                 ui.separator();
+                let lang = &mut self.project.system.language;
+                egui::ComboBox::from_id_salt("game-language")
+                    .selected_text(lang.name())
+                    .show_ui(ui, |ui| {
+                        for l in ALL_LANGUAGES {
+                            ui.selectable_value(lang, l, l.name());
+                        }
+                    })
+                    .response
+                    .on_hover_text("Game language");
+                ui.separator();
                 match &self.llm.status {
                     LlmStatus::Off => ui.weak("LLM: off"),
                     LlmStatus::Loading => ui.colored_label(egui::Color32::YELLOW, "LLM: loading…"),
@@ -207,6 +218,7 @@ impl App {
 
     fn play_view(&mut self, ui: &mut egui::Ui, dt: f32) {
         let ctx = ui.ctx().clone();
+        let lang = self.project.system.language;
         let Some(game) = &mut self.game else { return };
         game.update(&self.project, &mut self.llm, &ctx, dt);
 
@@ -347,7 +359,7 @@ impl App {
             ui.painter().text(
                 rect.left_bottom() + egui::vec2(8.0, -8.0),
                 egui::Align2::LEFT_BOTTOM,
-                "WASD/arrows move · Z/Space interact · Q/E rotate · F5 stop",
+                lang.controls_hint(),
                 egui::FontId::monospace(12.0),
                 egui::Color32::from_white_alpha(160),
             );
@@ -362,6 +374,7 @@ impl App {
     }
 
     fn dialogue_ui(&mut self, ctx: &egui::Context) {
+        let lang = self.project.system.language;
         let Some(game) = &mut self.game else { return };
         let Some(dialogue) = &mut game.dialogue else { return };
         let mut close = false;
@@ -391,25 +404,25 @@ impl App {
                 if let Some(chat) = &mut dialogue.chat {
                     ui.horizontal(|ui| {
                         let editing = egui::TextEdit::singleline(&mut chat.input)
-                            .hint_text("Say something…")
+                            .hint_text(lang.say_something())
                             .desired_width(360.0)
                             .show(ui);
                         let enter = editing.response.lost_focus()
                             && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         let clicked = ui
-                            .add_enabled(!dialogue.streaming && !chat.input.trim().is_empty(), egui::Button::new("Send"))
+                            .add_enabled(!dialogue.streaming && !chat.input.trim().is_empty(), egui::Button::new(lang.send()))
                             .clicked();
                         if (enter || clicked) && !dialogue.streaming && !chat.input.trim().is_empty() {
                             send = Some(chat.input.trim().to_string());
                             chat.input.clear();
                         }
-                        if ui.button("Leave").clicked() {
+                        if ui.button(lang.leave()).clicked() {
                             close = true;
                         }
                         editing.response.request_focus();
                     });
                 } else {
-                    ui.small("Z / Esc to close");
+                    ui.small(lang.close_hint());
                     if ctx.input(|i| {
                         i.key_pressed(egui::Key::Z)
                             || i.key_pressed(egui::Key::Enter)
@@ -441,6 +454,7 @@ impl App {
                         history: chat.history.clone(),
                         max_tokens: self.project.llm.max_reply_tokens,
                         temperature: self.project.llm.temperature,
+                        language: self.project.system.language,
                     };
                     d.text.clear();
                     chat.pending_req = self.llm.request(req);
@@ -457,18 +471,19 @@ impl App {
     }
 
     fn game_over_ui(&mut self, ctx: &egui::Context) {
+        let lang = self.project.system.language;
         let Some(game) = &self.game else { return };
         if !game.game_over {
             return;
         }
         let mut stop = false;
-        egui::Window::new("Game Over")
+        egui::Window::new(lang.game_over())
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.heading("The party has fallen…");
-                if ui.button("Return to editor").clicked() {
+                ui.heading(lang.party_fallen());
+                if ui.button(lang.return_to_editor()).clicked() {
                     stop = true;
                 }
             });

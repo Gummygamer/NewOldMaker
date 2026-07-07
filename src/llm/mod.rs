@@ -6,7 +6,7 @@
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
-use crate::core::data::{LlmBackend, LlmSettings, NpcPersona};
+use crate::core::data::{Language, LlmBackend, LlmSettings, NpcPersona};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LlmStatus {
@@ -34,6 +34,8 @@ pub struct ChatRequest {
     pub history: Vec<ChatTurn>,
     pub max_tokens: u32,
     pub temperature: f32,
+    /// Language the NPC should reply in.
+    pub language: Language,
 }
 
 #[derive(Clone, Debug)]
@@ -194,6 +196,10 @@ pub fn system_prompt(req: &ChatRequest) -> String {
          thoughts — only the words you say aloud. You have no tools; just talk. \
          Keep replies to one to three short sentences.",
     );
+    if let Some(instruction) = req.language.llm_instruction() {
+        s.push(' ');
+        s.push_str(instruction);
+    }
     s
 }
 
@@ -1325,6 +1331,7 @@ mod tests {
                 }],
                 max_tokens: 64,
                 temperature: 0.8,
+                language: Language::default(),
             })
             .expect("request accepted");
 
@@ -1417,6 +1424,7 @@ mod nim_tests {
                 }],
                 max_tokens: 64,
                 temperature: 0.8,
+                language: Language::default(),
             })
             .expect("request accepted");
 
