@@ -265,9 +265,14 @@ fn is_reasoning_channel(name: &str) -> bool {
 /// Tag names that mark a bare `<name>` tag as markup rather than dialogue:
 /// reasoning channels plus the HTML and turn-boundary tags models fall back
 /// to. Kept to a fixed list so dialogue like "press <Enter>" is never eaten.
+/// The one open-ended family is `start_of_*` / `end_of_*`: models improvise
+/// boundary tokens in that shape (`<end_of_turn>`, `<end_of_action>`, …) and
+/// no plausible dialogue does.
 fn is_markup_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     is_reasoning_channel(&name)
+        || name.starts_with("start_of_")
+        || name.starts_with("end_of_")
         || matches!(
             name.as_str(),
             "div"
@@ -286,8 +291,6 @@ fn is_markup_name(name: &str) -> bool {
                 | "pre"
                 | "details"
                 | "summary"
-                | "start_of_turn"
-                | "end_of_turn"
                 | "im_start"
                 | "im_end"
         )
@@ -981,6 +984,21 @@ mod filter_tests {
     fn gemma_turn_tags_are_stripped() {
         let raw = "<start_of_turn>model\nGood morning to you.<end_of_turn>";
         assert_eq!(run(raw, 3), "Good morning to you.");
+    }
+
+    /// The leak from the screenshot: an improvised boundary tag mid-reply.
+    /// Anything shaped like `<start_of_*>`/`<end_of_*>` is swallowed, while
+    /// the dialogue on both sides of it stays.
+    #[test]
+    fn improvised_boundary_tags_are_swallowed() {
+        let raw = "for real? I'm going to a store.\n<end_of_action>\nSo leave me be.";
+        for chunk in [1, 4, 64] {
+            assert_eq!(
+                run(raw, chunk),
+                "for real? I'm going to a store.\n\nSo leave me be."
+            );
+        }
+        assert_eq!(run("<start_of_reply>Hello there.", 3), "Hello there.");
     }
 
     /// Unknown bare tags without attributes stay untouched — they may be
