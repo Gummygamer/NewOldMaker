@@ -1,0 +1,4 @@
+[env]
+# llama-cpp-sys-2's bindgen needs C builtin headers (stdbool.h etc.); this
+# system has libclang but not clang's resource headers, so borrow gcc's.
+BINDGEN_EXTRA_CLANG_ARGS = "-I/usr/lib/gcc/x86_64-linux-gnu/15/include"

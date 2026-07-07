@@ -1,0 +1,33 @@
+[package]
+name = "newoldmaker"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+bytemuck = { version = "1.25.0", features = ["derive"] }
+eframe = { version = "0.35.0", features = ["wgpu"] }
+encoding_rs = "0.8.35"
+glam = "0.33.2"
+llama-cpp-2 = { version = "0.1.151", optional = true }
+rand = "0.10.2"
+rfd = "0.17.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+
+[features]
+default = ["llm"]
+llm = ["dep:llama-cpp-2"]
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[dev-dependencies]
+pollster = "0.4.0"
