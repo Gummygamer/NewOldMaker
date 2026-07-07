@@ -11,7 +11,8 @@ pub fn save_project(project: &ProjectData, path: &Path) -> Result<()> {
 }
 
 pub fn load_project(path: &Path) -> Result<ProjectData> {
-    let json = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let json =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let project: ProjectData = serde_json::from_str(&json).context("parsing project JSON")?;
     if project.format_version > FORMAT_VERSION {
         bail!(
@@ -29,7 +30,7 @@ mod tests {
 
     #[test]
     fn project_roundtrips_through_json() {
-        let p = default_project();
+        let p = default_project(crate::core::data::Language::default());
         let json = serde_json::to_string(&p).unwrap();
         let p2: crate::core::data::ProjectData = serde_json::from_str(&json).unwrap();
         assert_eq!(p.maps.len(), p2.maps.len());
@@ -42,7 +43,7 @@ mod tests {
 
     #[test]
     fn save_and_load_from_disk() {
-        let p = default_project();
+        let p = default_project(crate::core::data::Language::default());
         let dir = std::env::temp_dir().join("nom_io_test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.nom.json");

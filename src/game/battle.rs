@@ -94,8 +94,14 @@ pub enum Menu {
 
 pub enum Phase {
     Intro(f32),
-    Choose { fighter: usize, menu: Menu, boost: i32 },
-    Anim { timer: f32 },
+    Choose {
+        fighter: usize,
+        menu: Menu,
+        boost: i32,
+    },
+    Anim {
+        timer: f32,
+    },
     Finished(OutcomeKind, f32),
 }
 
@@ -139,7 +145,9 @@ impl Battle {
         let mut fighters = Vec::new();
         let n_e = troop.members.len().max(1) as f32;
         for (i, enemy_id) in troop.members.iter().enumerate() {
-            let Some(e) = project.enemy(*enemy_id) else { continue };
+            let Some(e) = project.enemy(*enemy_id) else {
+                continue;
+            };
             let z = cz + (i as f32 - (n_e - 1.0) / 2.0) * 1.6;
             let x = cx - 2.4 - (i as f32 % 2.0) * 0.7;
             fighters.push(Fighter {
@@ -215,7 +223,7 @@ impl Battle {
             order_pos: 0,
             round: 1,
             phase: Phase::Intro(0.8),
-            log: vec![format!("{} attacks!", troop.name)],
+            log: vec![project.system.language.attacks(&troop.name)],
             popups: Vec::new(),
             camera,
             inventory: game.inventory.clone(),
@@ -227,7 +235,9 @@ impl Battle {
     }
 
     fn compute_order(&mut self) {
-        let mut idx: Vec<usize> = (0..self.fighters.len()).filter(|i| self.fighters[*i].alive()).collect();
+        let mut idx: Vec<usize> = (0..self.fighters.len())
+            .filter(|i| self.fighters[*i].alive())
+            .collect();
         idx.sort_by_key(|i| -(self.fighters[*i].max.spd));
         self.order = idx;
         self.order_pos = 0;
@@ -260,12 +270,16 @@ impl Battle {
             }
             if self.fighters[fi].is_player {
                 self.fighters[fi].defending = false;
-                self.phase = Phase::Choose { fighter: fi, menu: Menu::Root, boost: 0 };
+                self.phase = Phase::Choose {
+                    fighter: fi,
+                    menu: Menu::Root,
+                    boost: 0,
+                };
                 return;
             }
             // Enemy turn.
             if self.fighters[fi].broken > 0 {
-                self.log_line(format!("{} is broken and can't move!", self.fighters[fi].name));
+                self.log_line(project.system.language.is_broken(&self.fighters[fi].name));
                 self.phase = Phase::Anim { timer: 0.45 };
                 return;
             }
@@ -306,15 +320,29 @@ impl Battle {
     }
 
     fn popup(&mut self, at: Vec3, text: String, color: [f32; 3]) {
-        self.popups.push(Popup { pos: at + Vec3::Y * 1.4, text, color, age: 0.0 });
+        self.popups.push(Popup {
+            pos: at + Vec3::Y * 1.4,
+            text,
+            color,
+            age: 0.0,
+        });
     }
 
     // -----------------------------------------------------------------
     // Executing actions
     // -----------------------------------------------------------------
 
-    fn deal_damage(&mut self, project: &ProjectData, src: usize, dst: usize, element: Element, power: f32, hits: u32, boost: i32) {
-        let _ = project;
+    fn deal_damage(
+        &mut self,
+        project: &ProjectData,
+        src: usize,
+        dst: usize,
+        element: Element,
+        power: f32,
+        hits: u32,
+        boost: i32,
+    ) {
+        let lang = project.system.language;
         let mut rng = rand::rng();
         let physical = element.physical();
         let mut hit_any = false;
@@ -344,26 +372,38 @@ impl Battle {
             let dmg = dmg.round() as i32;
             self.fighters[dst].hp = (self.fighters[dst].hp - dmg).max(0);
             self.fighters[dst].flash = 0.25;
-            let color = if weak { [1.0, 0.85, 0.2] } else { [1.0, 1.0, 1.0] };
+            let color = if weak {
+                [1.0, 0.85, 0.2]
+            } else {
+                [1.0, 1.0, 1.0]
+            };
             let pos = self.fighters[dst].pos;
             self.popup(pos, format!("{dmg}"), color);
 
             // Shields chip on weakness hits.
-            if weak && !self.fighters[dst].is_player && self.fighters[dst].broken == 0 && self.fighters[dst].shields_max > 0 {
+            if weak
+                && !self.fighters[dst].is_player
+                && self.fighters[dst].broken == 0
+                && self.fighters[dst].shields_max > 0
+            {
                 let s = self.fighters[dst].shields.saturating_sub(1);
                 self.fighters[dst].shields = s;
                 if s == 0 {
                     self.fighters[dst].broken = 2;
                     broke = true;
                     let pos = self.fighters[dst].pos;
-                    self.popup(pos + Vec3::Y * 0.5, "BREAK!".into(), [1.0, 0.4, 0.2]);
+                    self.popup(
+                        pos + Vec3::Y * 0.5,
+                        lang.break_popup().into(),
+                        [1.0, 0.4, 0.2],
+                    );
                     let name = self.fighters[dst].name.clone();
-                    self.log_line(format!("{name}'s guard is broken!"));
+                    self.log_line(lang.guard_broken(&name));
                 }
             }
             if !self.fighters[dst].alive() {
                 let name = self.fighters[dst].name.clone();
-                self.log_line(format!("{name} is defeated!"));
+                self.log_line(lang.is_defeated(&name));
             }
         }
         // One sound per action: Break trumps a weakness hit, which trumps a
@@ -389,8 +429,16 @@ impl Battle {
         audio::sfx(Sfx::Heal);
     }
 
-    pub fn execute_player_action(&mut self, project: &ProjectData, fighter: usize, action: ActionKind, target: Option<usize>, boost: i32) {
+    pub fn execute_player_action(
+        &mut self,
+        project: &ProjectData,
+        fighter: usize,
+        action: ActionKind,
+        target: Option<usize>,
+        boost: i32,
+    ) {
         audio::sfx(Sfx::Confirm);
+        let lang = project.system.language;
         let boost = boost.min(self.fighters[fighter].bp).max(0);
         self.fighters[fighter].bp -= boost;
         let name = self.fighters[fighter].name.clone();
@@ -399,14 +447,14 @@ impl Battle {
                 if let Some(t) = target {
                     let el = self.fighters[fighter].attack_element;
                     let hits = 1 + boost as u32;
-                    self.log_line(format!("{name} attacks!"));
+                    self.log_line(lang.attacks(&name));
                     self.deal_damage(project, fighter, t, el, 1.0, hits, 0);
                 }
             }
             ActionKind::Skill(id) => {
                 if let Some(skill) = project.skill(id).cloned() {
                     self.fighters[fighter].mp -= skill.mp_cost as i32;
-                    self.log_line(format!("{name} uses {}!", skill.name));
+                    self.log_line(lang.uses(&name, &skill.name));
                     self.apply_skill(project, fighter, &skill, target, boost);
                 }
             }
@@ -415,7 +463,7 @@ impl Battle {
                     if let Some(slot) = self.inventory.iter_mut().find(|(i, _)| *i == id) {
                         if slot.1 > 0 {
                             slot.1 -= 1;
-                            self.log_line(format!("{name} uses {}!", item.name));
+                            self.log_line(lang.uses(&name, &item.name));
                             if let Some(t) = target {
                                 match item.kind {
                                     ItemKind::HealHp => self.heal(t, item.power),
@@ -423,14 +471,14 @@ impl Battle {
                                         let f = &mut self.fighters[t];
                                         f.mp = (f.mp + item.power).min(f.max.mp);
                                         let pos = f.pos;
-                                        self.popup(pos, format!("+{} MP", item.power), [0.4, 0.7, 1.0]);
+                                        self.popup(pos, lang.mp_gain(item.power), [0.4, 0.7, 1.0]);
                                     }
                                     ItemKind::Revive => {
                                         let f = &mut self.fighters[t];
                                         if !f.alive() {
                                             f.hp = item.power.min(f.max.hp);
                                             let pos = f.pos;
-                                            self.popup(pos, "Revived!".into(), [1.0, 0.9, 0.4]);
+                                            self.popup(pos, lang.revived().into(), [1.0, 0.9, 0.4]);
                                         }
                                     }
                                 }
@@ -443,7 +491,7 @@ impl Battle {
                 self.fighters[fighter].defending = true;
                 // Defending banks the boost back.
                 self.fighters[fighter].bp = (self.fighters[fighter].bp + boost + 0).min(MAX_BP);
-                self.log_line(format!("{name} guards."));
+                self.log_line(lang.guards(&name));
             }
             ActionKind::Flee => {
                 let party_spd: f32 = self
@@ -452,20 +500,32 @@ impl Battle {
                     .filter(|f| f.is_player && f.alive())
                     .map(|f| f.max.spd as f32)
                     .sum::<f32>()
-                    / self.fighters.iter().filter(|f| f.is_player && f.alive()).count().max(1) as f32;
+                    / self
+                        .fighters
+                        .iter()
+                        .filter(|f| f.is_player && f.alive())
+                        .count()
+                        .max(1) as f32;
                 let chance = (0.5 + (party_spd - self.avg_enemy_spd) * 0.02).clamp(0.15, 0.95);
                 if rand::rng().random_range(0.0..1.0) < chance {
-                    self.log_line("Got away safely!".into());
+                    self.log_line(lang.got_away().into());
                     self.phase = Phase::Finished(OutcomeKind::Fled, 0.7);
                     return;
                 }
-                self.log_line("Couldn't escape!".into());
+                self.log_line(lang.couldnt_escape().into());
             }
         }
         self.phase = Phase::Anim { timer: 0.7 };
     }
 
-    fn apply_skill(&mut self, project: &ProjectData, src: usize, skill: &Skill, target: Option<usize>, boost: i32) {
+    fn apply_skill(
+        &mut self,
+        project: &ProjectData,
+        src: usize,
+        skill: &Skill,
+        target: Option<usize>,
+        boost: i32,
+    ) {
         let src_is_player = self.fighters[src].is_player;
         let enemies: Vec<usize> = (0..self.fighters.len())
             .filter(|i| self.fighters[*i].is_player != src_is_player && self.fighters[*i].alive())
@@ -483,11 +543,20 @@ impl Battle {
         for t in targets {
             match skill.effect {
                 SkillEffect::Damage => {
-                    self.deal_damage(project, src, t, skill.element, skill.power, skill.hits as u32, boost);
+                    self.deal_damage(
+                        project,
+                        src,
+                        t,
+                        skill.element,
+                        skill.power,
+                        skill.hits as u32,
+                        boost,
+                    );
                 }
                 SkillEffect::Heal => {
                     let m = self.fighters[src].atk_stat(false);
-                    let amount = (m * 1.8 * skill.power * (1.0 + 0.5 * boost as f32)).round() as i32;
+                    let amount =
+                        (m * 1.8 * skill.power * (1.0 + 0.5 * boost as f32)).round() as i32;
                     self.heal(t, amount);
                 }
                 SkillEffect::BuffAttack(turns) => {
@@ -497,7 +566,15 @@ impl Battle {
                 }
                 SkillEffect::BreakDefense(turns) => {
                     if skill.power > 0.0 {
-                        self.deal_damage(project, src, t, skill.element, skill.power, skill.hits as u32, boost);
+                        self.deal_damage(
+                            project,
+                            src,
+                            t,
+                            skill.element,
+                            skill.power,
+                            skill.hits as u32,
+                            boost,
+                        );
                     }
                     self.fighters[t].debuff_def = turns + boost as u8;
                     let pos = self.fighters[t].pos;
@@ -508,6 +585,7 @@ impl Battle {
     }
 
     fn enemy_act(&mut self, project: &ProjectData, fi: usize) {
+        let lang = project.system.language;
         let mut rng = rand::rng();
         let players: Vec<usize> = (0..self.fighters.len())
             .filter(|i| self.fighters[*i].is_player && self.fighters[*i].alive())
@@ -532,12 +610,12 @@ impl Battle {
             let id = usable[rng.random_range(0..usable.len())];
             if let Some(skill) = project.skill(id).cloned() {
                 self.fighters[fi].mp -= skill.mp_cost as i32;
-                self.log_line(format!("{name} uses {}!", skill.name));
+                self.log_line(lang.uses(&name, &skill.name));
                 self.apply_skill(project, fi, &skill, Some(target), 0);
                 return;
             }
         }
-        self.log_line(format!("{name} attacks!"));
+        self.log_line(lang.attacks(&name));
         let el = self.fighters[fi].attack_element;
         self.deal_damage(project, fi, target, el, 1.0, 1, 0);
     }
@@ -584,7 +662,13 @@ impl Battle {
     }
 
     /// Write battle results back into the party; returns the final outcome.
-    pub fn settle(&self, party: &mut [Member], project: &ProjectData, kind: OutcomeKind, inventory: &mut Vec<(u32, u32)>) -> Outcome {
+    pub fn settle(
+        &self,
+        party: &mut [Member],
+        project: &ProjectData,
+        kind: OutcomeKind,
+        inventory: &mut Vec<(u32, u32)>,
+    ) -> Outcome {
         *inventory = self.inventory.clone();
         for f in &self.fighters {
             if let Some(i) = f.member_idx {
@@ -596,7 +680,12 @@ impl Battle {
         }
         match kind {
             OutcomeKind::Victory => {
-                let exp: u32 = self.fighters.iter().filter(|f| !f.is_player).map(|f| f.exp).sum();
+                let exp: u32 = self
+                    .fighters
+                    .iter()
+                    .filter(|f| !f.is_player)
+                    .map(|f| f.exp)
+                    .sum();
                 let mut messages = Vec::new();
                 for m in party.iter_mut() {
                     if m.hp <= 0 {
@@ -614,7 +703,7 @@ impl Battle {
                             m.hp = (m.hp + hp_gain.max(0)).min(m.max.hp);
                             m.mp = m.mp.min(m.max.mp);
                         }
-                        messages.push(format!("{} reached Lv.{}!", m.name, m.level));
+                        messages.push(project.system.language.reached_level(&m.name, m.level));
                     }
                 }
                 Outcome::Victory { exp, messages }
@@ -629,6 +718,7 @@ impl Battle {
     // -----------------------------------------------------------------
 
     pub fn ui(&mut self, ctx: &egui::Context, project: &ProjectData) {
+        let lang = project.system.language;
         // Enemy roster (top left).
         egui::Window::new("enemies")
             .title_bar(false)
@@ -642,7 +732,7 @@ impl Battle {
                         continue;
                     }
                     let shields = if f.broken > 0 {
-                        "BREAK".to_string()
+                        lang.break_popup().to_string()
                     } else if f.shields_max > 0 {
                         format!("🛡{}", f.shields)
                     } else {
@@ -657,9 +747,13 @@ impl Battle {
                         }
                     });
                     let frac = f.hp as f32 / f.max.hp.max(1) as f32;
-                    ui.add(egui::ProgressBar::new(frac).desired_width(140.0).desired_height(6.0));
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .desired_width(140.0)
+                            .desired_height(6.0),
+                    );
                 }
-                ui.small(format!("Round {}", self.round));
+                ui.small(lang.round(self.round));
                 for line in &self.log {
                     ui.small(line);
                 }
@@ -704,8 +798,8 @@ impl Battle {
                             let fi = *fighter;
                             let f = &self.fighters[fi];
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(format!("{} — choose action", f.name)).strong());
-                                ui.label(egui::RichText::new(format!("Boost: {boost}")).color(egui::Color32::from_rgb(255, 200, 80)));
+                                ui.label(egui::RichText::new(lang.choose_action(&f.name)).strong());
+                                ui.label(egui::RichText::new(format!("{}: {boost}", lang.boost())).color(egui::Color32::from_rgb(255, 200, 80)));
                             });
                             ui.horizontal(|ui| {
                                 for b in 0..=3.min(f.bp) {
@@ -717,19 +811,19 @@ impl Battle {
                             match menu {
                                 Menu::Root => {
                                     ui.horizontal_wrapped(|ui| {
-                                        if ui.button("⚔ Attack").clicked() {
+                                        if ui.button(lang.attack()).clicked() {
                                             *menu = Menu::Targets { action: ActionKind::Attack, allies: false };
                                         }
-                                        if ui.button("✨ Skills").clicked() {
+                                        if ui.button(lang.skills()).clicked() {
                                             *menu = Menu::Skills;
                                         }
-                                        if ui.button("🎒 Items").clicked() {
+                                        if ui.button(lang.items()).clicked() {
                                             *menu = Menu::Items;
                                         }
-                                        if ui.button("🛡 Defend").clicked() {
+                                        if ui.button(lang.defend()).clicked() {
                                             chosen = Some((fi, ActionKind::Defend, None, *boost));
                                         }
-                                        if ui.button("🏃 Flee").clicked() {
+                                        if ui.button(lang.flee()).clicked() {
                                             chosen = Some((fi, ActionKind::Flee, None, 0));
                                         }
                                     });
@@ -755,7 +849,7 @@ impl Battle {
                                             }
                                         }
                                     });
-                                    if ui.small_button("← Back").clicked() {
+                                    if ui.small_button(lang.back()).clicked() {
                                         *menu = Menu::Root;
                                     }
                                 }
@@ -771,12 +865,12 @@ impl Battle {
                                             *menu = Menu::Targets { action: ActionKind::Item(id), allies: true };
                                         }
                                     }
-                                    if ui.small_button("← Back").clicked() {
+                                    if ui.small_button(lang.back()).clicked() {
                                         *menu = Menu::Root;
                                     }
                                 }
                                 Menu::Targets { action, allies } => {
-                                    ui.label("Target:");
+                                    ui.label(lang.target());
                                     let action = *action;
                                     let allies = *allies;
                                     let targets: Vec<(usize, String)> = self
@@ -801,16 +895,16 @@ impl Battle {
                                             }
                                         }
                                     });
-                                    if ui.small_button("← Back").clicked() {
+                                    if ui.small_button(lang.back()).clicked() {
                                         *menu = Menu::Root;
                                     }
                                 }
                             }
                         } else if let Phase::Finished(kind, _) = &self.phase {
                             let msg = match kind {
-                                OutcomeKind::Victory => "Victory!",
-                                OutcomeKind::Defeat => "The party has fallen…",
-                                OutcomeKind::Fled => "Escaped!",
+                                OutcomeKind::Victory => lang.victory(),
+                                OutcomeKind::Defeat => lang.party_fallen(),
+                                OutcomeKind::Fled => lang.escaped(),
                             };
                             ui.heading(msg);
                         } else {
@@ -841,8 +935,21 @@ impl Battle {
             } else if !f.alive() {
                 tint = [0.35, 0.3, 0.4, 1.0];
             }
-            let frame = if f.is_player { ((time * 2.0) as u32 + i as u32) % 3 } else { 0 };
-            out.push((i, f, tint, if f.is_player { DIR_LEFT * 3 + frame } else { frame }));
+            let frame = if f.is_player {
+                ((time * 2.0) as u32 + i as u32) % 3
+            } else {
+                0
+            };
+            out.push((
+                i,
+                f,
+                tint,
+                if f.is_player {
+                    DIR_LEFT * 3 + frame
+                } else {
+                    frame
+                },
+            ));
         }
         out
     }
@@ -855,21 +962,25 @@ mod tests {
     use crate::game::Game;
 
     fn setup(troop: u32) -> (ProjectData, Battle) {
-        let project = default_project();
+        let project = default_project(Language::default());
         let game = Game::new(&project);
         let battle = Battle::new(&project, &game, troop).expect("troop exists");
         (project, battle)
     }
 
     fn first_alive_enemy(b: &Battle) -> usize {
-        (0..b.fighters.len()).find(|i| !b.fighters[*i].is_player && b.fighters[*i].alive()).unwrap()
+        (0..b.fighters.len())
+            .find(|i| !b.fighters[*i].is_player && b.fighters[*i].alive())
+            .unwrap()
     }
 
     #[test]
     fn weakness_hits_chip_shields_and_break() {
         let (project, mut b) = setup(1); // slimes: shields 2, weak to Slash/Fire
         let e = first_alive_enemy(&b);
-        let p = (0..b.fighters.len()).find(|i| b.fighters[*i].is_player).unwrap();
+        let p = (0..b.fighters.len())
+            .find(|i| b.fighters[*i].is_player)
+            .unwrap();
         assert_eq!(b.fighters[e].shields, 2);
         // Slash attack (weakness) chips one shield per hit.
         b.deal_damage(&project, p, e, Element::Slash, 0.01, 1, 0);
@@ -880,7 +991,9 @@ mod tests {
         // Non-weakness element must not chip shields on a fresh enemy.
         let (project2, mut b2) = setup(1);
         let e2 = first_alive_enemy(&b2);
-        let p2 = (0..b2.fighters.len()).find(|i| b2.fighters[*i].is_player).unwrap();
+        let p2 = (0..b2.fighters.len())
+            .find(|i| b2.fighters[*i].is_player)
+            .unwrap();
         b2.deal_damage(&project2, p2, e2, Element::Ice, 0.01, 1, 0);
         assert_eq!(b2.fighters[e2].shields, 2);
     }
@@ -889,7 +1002,9 @@ mod tests {
     fn broken_enemies_take_bonus_damage() {
         let (project, mut b) = setup(4); // golem, high HP
         let e = first_alive_enemy(&b);
-        let p = (0..b.fighters.len()).find(|i| b.fighters[*i].is_player).unwrap();
+        let p = (0..b.fighters.len())
+            .find(|i| b.fighters[*i].is_player)
+            .unwrap();
         // Sample damage many times before/after break to smooth variance.
         let sample = |b: &mut Battle, project: &ProjectData| -> f32 {
             let mut total = 0.0;
@@ -904,16 +1019,25 @@ mod tests {
         let normal = sample(&mut b, &project);
         b.fighters[e].broken = 2;
         let broken = sample(&mut b, &project);
-        assert!(broken > normal * 1.3, "break should amplify damage: {normal} -> {broken}");
+        assert!(
+            broken > normal * 1.3,
+            "break should amplify damage: {normal} -> {broken}"
+        );
     }
 
     #[test]
     fn boost_spends_bp_and_amplifies() {
         let (project, mut b) = setup(4);
         let e = first_alive_enemy(&b);
-        let p = (0..b.fighters.len()).find(|i| b.fighters[*i].is_player).unwrap();
+        let p = (0..b.fighters.len())
+            .find(|i| b.fighters[*i].is_player)
+            .unwrap();
         b.fighters[p].bp = 3;
-        b.phase = Phase::Choose { fighter: p, menu: Menu::Root, boost: 0 };
+        b.phase = Phase::Choose {
+            fighter: p,
+            menu: Menu::Root,
+            boost: 0,
+        };
         let before = b.fighters[e].hp;
         b.execute_player_action(&project, p, ActionKind::Attack, Some(e), 3);
         assert_eq!(b.fighters[p].bp, 0, "boost must spend BP");
@@ -924,7 +1048,9 @@ mod tests {
     #[test]
     fn bp_banks_each_round() {
         let (_project, mut b) = setup(1);
-        let p = (0..b.fighters.len()).find(|i| b.fighters[*i].is_player).unwrap();
+        let p = (0..b.fighters.len())
+            .find(|i| b.fighters[*i].is_player)
+            .unwrap();
         let start = b.fighters[p].bp;
         b.end_round();
         assert_eq!(b.fighters[p].bp, start + 1);
@@ -937,7 +1063,7 @@ mod tests {
     #[test]
     fn full_battle_reaches_victory_and_grants_exp() {
         let (project, mut b) = setup(1);
-        let mut party: Vec<Member> = default_project()
+        let mut party: Vec<Member> = default_project(Language::default())
             .system
             .party
             .iter()
@@ -980,7 +1106,9 @@ mod tests {
     #[test]
     fn healing_never_exceeds_max_and_skips_dead() {
         let (_project, mut b) = setup(1);
-        let p = (0..b.fighters.len()).find(|i| b.fighters[*i].is_player).unwrap();
+        let p = (0..b.fighters.len())
+            .find(|i| b.fighters[*i].is_player)
+            .unwrap();
         b.fighters[p].hp = b.fighters[p].max.hp - 5;
         b.heal(p, 9999);
         assert_eq!(b.fighters[p].hp, b.fighters[p].max.hp);

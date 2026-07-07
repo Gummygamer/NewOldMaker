@@ -340,7 +340,7 @@ impl Game {
             if let Some(kind) = done {
                 let battle = self.battle.take().unwrap();
                 let outcome = battle.settle(&mut self.party, project, kind, &mut self.inventory);
-                self.finish_battle(outcome);
+                self.finish_battle(project.system.language, outcome);
             }
             return;
         }
@@ -572,7 +572,7 @@ impl Game {
                     }
                     self.dialogue = Some(Dialogue {
                         speaker: "".into(),
-                        text: format!("Found {name}!"),
+                        text: project.system.language.found(&name),
                         chat: None,
                         streaming: false,
                         auto_close: None,
@@ -587,7 +587,7 @@ impl Game {
                 }
                 self.dialogue = Some(Dialogue {
                     speaker: "".into(),
-                    text: "The party feels refreshed!".into(),
+                    text: project.system.language.party_refreshed().into(),
                     chat: None,
                     streaming: false,
                     auto_close: None,
@@ -656,6 +656,7 @@ impl Game {
             history: chat.history.clone(),
             max_tokens: project.llm.max_reply_tokens,
             temperature: project.llm.temperature,
+            language: project.system.language,
         }
     }
 
@@ -667,7 +668,7 @@ impl Game {
         }
     }
 
-    fn finish_battle(&mut self, outcome: battle::Outcome) {
+    fn finish_battle(&mut self, lang: Language, outcome: battle::Outcome) {
         // Return the field music once combat ends (defeat keeps it silent).
         match outcome {
             battle::Outcome::Victory { exp, messages } => {
@@ -678,7 +679,7 @@ impl Game {
                 audio::music(Track::for_map(&self.map));
                 self.dialogue = Some(Dialogue {
                     speaker: "".into(),
-                    text: format!("Victory! Gained {exp} EXP.{}", if messages.is_empty() {
+                    text: format!("{}{}", lang.victory_gained(exp), if messages.is_empty() {
                         String::new()
                     } else {
                         format!("\n{}", messages.join("\n"))
