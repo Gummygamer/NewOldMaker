@@ -302,6 +302,16 @@ impl Game {
                         LlmEvent::Done { id } if Some(id) == chat.pending_req => {
                             chat.pending_req = None;
                             d.streaming = false;
+                            if d.text.trim().is_empty() {
+                                // The reply was all markup/reasoning and got
+                                // filtered away; fall back to a scripted line.
+                                d.text = chat
+                                    .persona
+                                    .fallback_lines
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_else(|| "…".into());
+                            }
                             chat.history.push(ChatTurn { from_player: false, text: d.text.clone() });
                         }
                         LlmEvent::Error { id, msg } if Some(id) == chat.pending_req => {

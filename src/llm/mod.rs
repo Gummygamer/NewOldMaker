@@ -165,7 +165,9 @@ pub fn system_prompt(req: &ChatRequest) -> String {
     }
     s.push_str(
         "Stay in character. Speak only as this character would, in plain spoken dialogue \
-         (no narration, no quotation marks, no stage directions). Keep replies to one to three short sentences.",
+         (no narration, no quotation marks, no stage directions). Never write HTML or XML \
+         tags, markup, or your private thoughts — only the words you say aloud. \
+         Keep replies to one to three short sentences.",
     );
     s
 }
@@ -193,6 +195,15 @@ pub fn system_prompt(req: &ChatRequest) -> String {
 /// <channel|>Well met, traveller!
 /// ```
 ///
+/// Some models instead degrade into HTML/XML-style markup — DeepSeek-style
+/// `<think>...</think>` blocks, or free-form tags like
+/// `<div style="thought" />` repeated line after line:
+///
+/// ```text
+/// <div style="thought" />
+/// <div style="thought" />
+/// ```
+///
 /// Without filtering, those tags and the private "thinking" channel leak into
 /// the chat bubble. This is a small streaming state machine: feed it token
 /// pieces as they arrive and it returns only the user-facing text, hiding
@@ -213,6 +224,9 @@ pub struct ReplyFilter {
     harmony: bool,
     /// Channel name currently being read (between `<|channel|>` and its body).
     name: String,
+    /// Name of the HTML-ish tag whose body is being hidden (e.g. `div` for
+    /// `<div class="thought">…</div>`), so its closer restores visibility.
+    hidden_tag: String,
     /// All user-facing text emitted so far (used for stop conditions / fallback).
     shown: String,
     /// Body of the most recent channel, kept as a last-resort fallback when no
@@ -246,6 +260,45 @@ fn is_reasoning_channel(name: &str) -> bool {
             | "critic"
             | "plan"
     )
+}
+
+/// Tag names that mark a bare `<name>` tag as markup rather than dialogue:
+/// reasoning channels plus the HTML and turn-boundary tags models fall back
+/// to. Kept to a fixed list so dialogue like "press <Enter>" is never eaten.
+fn is_markup_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    is_reasoning_channel(&name)
+        || matches!(
+            name.as_str(),
+            "div"
+                | "span"
+                | "p"
+                | "br"
+                | "hr"
+                | "b"
+                | "i"
+                | "em"
+                | "strong"
+                | "u"
+                | "sub"
+                | "sup"
+                | "code"
+                | "pre"
+                | "details"
+                | "summary"
+                | "start_of_turn"
+                | "end_of_turn"
+                | "im_start"
+                | "im_end"
+        )
+}
+
+/// True if any word in the tag (name or attribute values) names a reasoning
+/// channel, e.g. `div style="thought"`.
+fn has_reasoning_word(inner: &str) -> bool {
+    inner
+        .split(|c: char| !is_name_char(c))
+        .any(is_reasoning_channel)
 }
 
 impl ReplyFilter {
@@ -295,10 +348,18 @@ impl ReplyFilter {
     /// never left silent.
     pub fn finish(&mut self) -> String {
         let mut out = String::new();
-        // A trailing partial tag never completed. A '<' with a pipe after it
-        // is almost certainly truncated markup; anything else was real text.
+        // A trailing partial tag never completed. A '<' followed by a pipe, an
+        // attribute, or a known markup name is almost certainly truncated
+        // markup; anything else was real text.
         let leftover = std::mem::take(&mut self.pending);
-        if !(leftover.starts_with('<') && leftover.contains('|')) {
+        let markup = leftover.starts_with('<') && {
+            let body = leftover[1..].strip_prefix('/').unwrap_or(&leftover[1..]);
+            let name_end = body
+                .find(|c: char| !is_name_char(c))
+                .unwrap_or(body.len());
+            leftover.contains('|') || leftover.contains('=') || is_markup_name(&body[..name_end])
+        };
+        if !markup {
             self.consume_text(&leftover, &mut out);
         }
         if self.shown.trim().is_empty() {
@@ -351,32 +412,80 @@ impl ReplyFilter {
 
     fn handle_tag(&mut self, inner: &str, shape: TagShape) {
         self.harmony = true;
-        if shape == TagShape::Close {
-            // Gemma-4 style `<name|>`: the channel is over, and whatever
-            // follows is the user-facing reply (there is no explicit "final"
-            // channel in this dialect).
-            self.mode = Mode::Body;
-            self.visible = true;
-            return;
-        }
-        match inner.trim().to_ascii_lowercase().as_str() {
-            "channel" => {
-                self.name.clear();
-                self.mode = Mode::ReadingName;
-            }
-            "message" => self.begin_body(),
-            "start" => {
-                self.mode = Mode::SkipToTag;
-                self.visible = false;
-            }
-            "end" | "return" | "endoftext" | "eot" | "eom" => {
+        match shape {
+            TagShape::Close => {
+                // Gemma-4 style `<name|>`: the channel is over, and whatever
+                // follows is the user-facing reply (there is no explicit
+                // "final" channel in this dialect).
                 self.mode = Mode::Body;
-                self.visible = false;
+                self.visible = true;
             }
-            _ => {
-                // Unknown tag: if we were mid-name, treat it as the name's end.
-                if self.mode == Mode::ReadingName {
-                    self.begin_body();
+            TagShape::BareSelfClose => {
+                // Standalone markup like `<div style="thought" />`: swallow it.
+            }
+            TagShape::BareClose => {
+                // `</think>`, or the closer matching the tag that opened the
+                // hidden block (`</div>` after `<div class="thought">`): the
+                // reasoning is over and what follows is the reply. Other
+                // closers are markup noise; swallow.
+                let name = inner
+                    .split(|c: char| !is_name_char(c))
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if has_reasoning_word(inner)
+                    || (!self.hidden_tag.is_empty() && name == self.hidden_tag)
+                {
+                    self.hidden_tag.clear();
+                    self.mode = Mode::Body;
+                    self.visible = true;
+                }
+            }
+            TagShape::BareOpen => {
+                let name = inner
+                    .split(|c: char| !is_name_char(c))
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if name == "start_of_turn" || name == "im_start" {
+                    // A role name follows (e.g. `<start_of_turn>model`), then
+                    // the body — same as reading a channel name.
+                    self.name.clear();
+                    self.mode = Mode::ReadingName;
+                } else if name == "end_of_turn" || name == "im_end" {
+                    self.mode = Mode::Body;
+                    self.visible = false;
+                } else if has_reasoning_word(inner) {
+                    // `<think>` or `<div class="thought">`: hide the body
+                    // until the matching closer.
+                    self.hidden_tag = name;
+                    self.last_channel.clear();
+                    self.mode = Mode::Body;
+                    self.visible = false;
+                }
+                // Any other HTML-ish tag is markup noise; swallow it.
+            }
+            TagShape::Symmetric | TagShape::Open => {
+                match inner.trim().to_ascii_lowercase().as_str() {
+                    "channel" => {
+                        self.name.clear();
+                        self.mode = Mode::ReadingName;
+                    }
+                    "message" => self.begin_body(),
+                    "start" => {
+                        self.mode = Mode::SkipToTag;
+                        self.visible = false;
+                    }
+                    "end" | "return" | "endoftext" | "eot" | "eom" => {
+                        self.mode = Mode::Body;
+                        self.visible = false;
+                    }
+                    _ => {
+                        // Unknown tag: if we were mid-name, treat it as the name's end.
+                        if self.mode == Mode::ReadingName {
+                            self.begin_body();
+                        }
+                    }
                 }
             }
         }
@@ -391,6 +500,12 @@ enum TagShape {
     Open,
     /// Gemma-4 channel closer `<name|>`.
     Close,
+    /// HTML/XML-style opener `<name>` / `<name attrs>`.
+    BareOpen,
+    /// HTML/XML-style closer `</name>`.
+    BareClose,
+    /// HTML/XML-style self-closing tag `<name attrs />`.
+    BareSelfClose,
 }
 
 /// True for the characters allowed in a bare `<name|>` closing tag. Kept
@@ -418,13 +533,49 @@ fn match_tag(s: &str) -> Option<(String, TagShape, usize)> {
         };
     }
     let rest = s.strip_prefix('<')?;
-    let bar = rest.find("|>")?;
-    let name = &rest[..bar];
-    if !name.is_empty() && name.chars().all(is_name_char) {
-        Some((name.to_string(), TagShape::Close, 1 + bar + 2))
-    } else {
-        None
+    if let Some(bar) = rest.find("|>") {
+        let name = &rest[..bar];
+        if !name.is_empty() && name.chars().all(is_name_char) {
+            return Some((name.to_string(), TagShape::Close, 1 + bar + 2));
+        }
     }
+    // HTML/XML-style tags some models fall back to: `<think>`, `</think>`,
+    // `<div style="thought" />`. Only accepted when the tag name is a known
+    // markup name or the tag carries attributes (`=`), so dialogue containing
+    // '<' stays untouched.
+    let (body, closing) = match rest.strip_prefix('/') {
+        Some(r) => (r, true),
+        None => (rest, false),
+    };
+    if !body.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let name_end = body
+        .find(|c: char| !is_name_char(c))
+        .unwrap_or(body.len());
+    let name = &body[..name_end];
+    let after = &body[name_end..];
+    let gt = after.find('>')?;
+    let attrs = &after[..gt];
+    if attrs.contains('\n') || attrs.contains('<') || attrs.contains('|') {
+        return None;
+    }
+    let len = 1 + usize::from(closing) + name_end + gt + 1;
+    if closing {
+        if attrs.is_empty() && is_markup_name(name) {
+            return Some((name.to_string(), TagShape::BareClose, len));
+        }
+        return None;
+    }
+    if !is_markup_name(name) && !attrs.contains('=') {
+        return None;
+    }
+    let shape = if attrs.trim_end().ends_with('/') {
+        TagShape::BareSelfClose
+    } else {
+        TagShape::BareOpen
+    };
+    Some((format!("{name}{attrs}"), shape, len))
 }
 
 /// Could `s` (which starts with '<') still grow into a control tag once more
@@ -444,7 +595,30 @@ fn is_partial_tag(s: &str) -> bool {
     // Heading toward `<name|>`: word-like name, optionally ending in the pipe.
     let rest = &s[1..];
     let name = rest.strip_suffix('|').unwrap_or(rest);
-    !name.is_empty() && !name.contains('|') && name.chars().all(is_name_char)
+    if !name.is_empty() && !name.contains('|') && name.chars().all(is_name_char) {
+        return true;
+    }
+    // Heading toward an HTML-ish tag: `</name`, `<name attrs…`, `<name attrs /`.
+    // Capped so a false positive can't buffer text indefinitely.
+    if s.len() > 160 {
+        return false;
+    }
+    let body = rest.strip_prefix('/').unwrap_or(rest);
+    if body.is_empty() {
+        // Just "</" so far — the closer's name hasn't arrived yet.
+        return rest.starts_with('/');
+    }
+    if !body.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    let name_end = body
+        .find(|c: char| !is_name_char(c))
+        .unwrap_or(body.len());
+    let attrs = &body[name_end..];
+    if attrs.contains('>') || attrs.contains('\n') || attrs.contains('<') || attrs.contains('|') {
+        return false;
+    }
+    attrs.is_empty() || is_markup_name(&body[..name_end]) || attrs.contains('=')
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +799,10 @@ mod backend {
 
         let seed = (req.id as u32).wrapping_mul(2654435761).wrapping_add(1);
         let mut sampler = LlamaSampler::chain_simple([
+            // Quantized small models can lock into repeating one line forever
+            // (e.g. `<div style="thought" />` twelve times); penalize recent
+            // tokens so the loop breaks.
+            LlamaSampler::penalties(64, 1.15, 0.0, 0.0),
             LlamaSampler::temp(req.temperature.clamp(0.05, 2.0)),
             LlamaSampler::dist(seed),
         ]);
@@ -765,6 +943,58 @@ mod filter_tests {
     #[test]
     fn angle_bracket_word_is_text() {
         assert_eq!(run("I <3 slimes", 2), "I <3 slimes");
+    }
+
+    /// The leak from the screenshot: the model degrades into repeated
+    /// HTML-ish self-closing tags instead of channel markup.
+    #[test]
+    fn html_self_closing_thought_tags_are_swallowed() {
+        let raw = "<div style=\"thought\" />\n<div style=\"thought\" />\nFine, follow me.";
+        for chunk in [1, 4, 64] {
+            assert_eq!(run(raw, chunk), "Fine, follow me.");
+        }
+    }
+
+    /// DeepSeek-R1 style `<think>…</think>` reasoning block.
+    #[test]
+    fn think_block_is_hidden() {
+        let raw = "<think>\nThe player is rude; stay calm.\n</think>\nWatch your tongue.";
+        for chunk in [1, 5, 64] {
+            assert_eq!(run(raw, chunk), "Watch your tongue.");
+        }
+    }
+
+    #[test]
+    fn think_only_reply_falls_back() {
+        let raw = "<think>Just musing, no reply.</think>";
+        assert_eq!(run(raw, 3), "Just musing, no reply.");
+    }
+
+    #[test]
+    fn html_div_thought_block_is_hidden() {
+        let raw = "<div class=\"thought\">Should I trust them?</div>Aye, come in.";
+        assert_eq!(run(raw, 4), "Aye, come in.");
+    }
+
+    /// Gemma's real turn markers, in case they leak through detokenization.
+    #[test]
+    fn gemma_turn_tags_are_stripped() {
+        let raw = "<start_of_turn>model\nGood morning to you.<end_of_turn>";
+        assert_eq!(run(raw, 3), "Good morning to you.");
+    }
+
+    /// Unknown bare tags without attributes stay untouched — they may be
+    /// legitimate dialogue.
+    #[test]
+    fn unknown_bare_tag_is_text() {
+        assert_eq!(run("press <Enter> to continue", 2), "press <Enter> to continue");
+    }
+
+    /// A truncated markup tag at the very end of generation is dropped
+    /// (the newline before it is ordinary text and stays).
+    #[test]
+    fn truncated_html_tag_is_dropped() {
+        assert_eq!(run("Move along.\n<div style=\"thou", 4), "Move along.\n");
     }
 }
 
