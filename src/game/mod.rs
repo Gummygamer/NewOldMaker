@@ -526,9 +526,9 @@ impl Game {
     fn interact(&mut self, project: &ProjectData, llm: &mut LlmEngine) {
         let (dx, dy) = dir_delta(self.player.dir);
         let (tx, ty) = (self.player.x + dx, self.player.y + dy);
-        // A wandering NPC drifts off its spawn tile, so match its live position
-        // first; fall back to the static event tile for stationary events
-        // (signs, chests, non-wandering NPCs).
+        // Wandering NPCs move off their static event tile, so resolve the event
+        // by the NPC's live runtime position first; otherwise fall back to the
+        // static tile for stationary events (signs, chests, heal points).
         let ev = self
             .npcs
             .iter()
