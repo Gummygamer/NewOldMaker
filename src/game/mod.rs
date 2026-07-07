@@ -520,7 +520,7 @@ impl Game {
         let (tx, ty) = (self.player.x + dx, self.player.y + dy);
         // Wandering NPCs move off their static event tile, so resolve the event
         // by the NPC's live runtime position first; otherwise fall back to the
-        // static tile for stationary events (signs, chests, heal points, …).
+        // static tile for stationary events (signs, chests, heal points).
         let ev = self
             .npcs
             .iter()

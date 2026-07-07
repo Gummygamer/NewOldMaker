@@ -10,7 +10,7 @@ use glam::Vec3;
 
 use crate::core::data::*;
 use crate::gfx::camera::OrbitCamera;
-use crate::gfx::mesh::{pick_tile, tile_top_y, SPRITE_HORIZONTAL, SPRITE_UNLIT};
+use crate::gfx::mesh::{SPRITE_HORIZONTAL, SPRITE_UNLIT, pick_tile, tile_top_y};
 use crate::gfx::renderer::{Hd2dCallback, PostSettings};
 use crate::gfx::scene;
 
@@ -52,7 +52,10 @@ pub struct EditorState {
 impl EditorState {
     pub fn new(project: &ProjectData) -> Self {
         let map_id = project.system.start_map;
-        let map = project.map(map_id).or_else(|| project.maps.first()).expect("project has maps");
+        let map = project
+            .map(map_id)
+            .or_else(|| project.maps.first())
+            .expect("project has maps");
         let mut camera = OrbitCamera::default();
         camera.target = Vec3::new(map.width as f32 / 2.0, 0.5, map.height as f32 / 2.0);
         camera.dist = (map.width.max(map.height) as f32) * 0.9;
@@ -200,26 +203,57 @@ pub fn viewport(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut EditorSta
         let pos = Vec3::new(ev.x as f32 + 0.5, top, ev.y as f32 + 0.5);
         let color = match &ev.kind {
             EventKind::Npc { sprite, .. } => {
-                scene::char_sprites(atlas, *sprite as usize, 0, 1, pos, [1.0; 4], &mut cutout, &mut blend);
+                scene::char_sprites(
+                    atlas,
+                    *sprite as usize,
+                    0,
+                    1,
+                    pos,
+                    [1.0; 4],
+                    &mut cutout,
+                    &mut blend,
+                );
                 [0.3, 0.9, 0.4, 0.4]
             }
             EventKind::Sign { .. } => {
-                cutout.push(scene::sprite(pos, scene::PROP_SIZE, atlas.props[Prop::Signpost as usize], [1.0; 4], 0));
+                cutout.push(scene::sprite(
+                    pos,
+                    scene::PROP_SIZE,
+                    atlas.props[Prop::Signpost as usize],
+                    [1.0; 4],
+                    0,
+                ));
                 [0.8, 0.6, 0.3, 0.4]
             }
             EventKind::Chest { .. } => {
-                cutout.push(scene::sprite(pos, scene::PROP_SIZE, atlas.props[Prop::Barrel as usize], [1.3, 1.1, 0.5, 1.0], 0));
+                cutout.push(scene::sprite(
+                    pos,
+                    scene::PROP_SIZE,
+                    atlas.props[Prop::Barrel as usize],
+                    [1.3, 1.1, 0.5, 1.0],
+                    0,
+                ));
                 [1.0, 0.85, 0.2, 0.45]
             }
             EventKind::Transfer { .. } => [0.2, 0.8, 1.0, 0.5],
             EventKind::BattleTrigger { .. } => [1.0, 0.25, 0.2, 0.5],
             EventKind::HealPoint => {
-                cutout.push(scene::sprite(pos, scene::PROP_SIZE, atlas.props[Prop::Crystal as usize], [0.6, 1.3, 0.7, 1.0], 0));
+                cutout.push(scene::sprite(
+                    pos,
+                    scene::PROP_SIZE,
+                    atlas.props[Prop::Crystal as usize],
+                    [0.6, 1.3, 0.7, 1.0],
+                    0,
+                ));
                 [0.3, 1.0, 0.6, 0.45]
             }
         };
         let selected = ed.selected_event == Some(ev.id);
-        let tint = if selected { [1.0, 1.0, 1.0, 0.75] } else { color };
+        let tint = if selected {
+            [1.0, 1.0, 1.0, 0.75]
+        } else {
+            color
+        };
         blend.push(scene::sprite(
             pos + Vec3::Y * 0.04,
             [0.95, 0.95],
@@ -258,10 +292,13 @@ pub fn viewport(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut EditorSta
         blend,
         post,
     );
-    ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(
-        rect,
-        Hd2dCallback { input: Arc::new(input) },
-    ));
+    ui.painter()
+        .add(eframe::egui_wgpu::Callback::new_paint_callback(
+            rect,
+            Hd2dCallback {
+                input: Arc::new(input),
+            },
+        ));
 
     // Status line overlay.
     let status = match ed.hovered {
@@ -291,7 +328,9 @@ pub fn viewport(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut EditorSta
 
 fn apply_tool(project: &mut ProjectData, ed: &mut EditorState, tx: i32, ty: i32, ctrl: bool) {
     let repeat_same_tile = ed.last_tile == Some((tx, ty));
-    let Some(map) = project.map_mut(ed.current_map) else { return };
+    let Some(map) = project.map_mut(ed.current_map) else {
+        return;
+    };
     let mut changed = false;
     match ed.tool {
         Tool::Terrain => {
@@ -348,7 +387,9 @@ impl EditorState {
 }
 
 fn new_event_popup(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut EditorState) {
-    let Some((tx, ty)) = ed.new_event_at else { return };
+    let Some((tx, ty)) = ed.new_event_at else {
+        return;
+    };
     let mut open = true;
     let mut created: Option<EventKind> = None;
     egui::Window::new("New Event")
@@ -428,19 +469,21 @@ pub fn left_panel(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut EditorS
     match ed.tool {
         Tool::Terrain => {
             ui.label(RichText::new("Terrain palette").strong());
-            egui::Grid::new("terrain-palette").num_columns(2).show(ui, |ui| {
-                for (i, t) in ALL_TERRAINS.iter().enumerate() {
-                    let base = terrain_swatch(*t);
-                    let selected = ed.sel_terrain == *t;
-                    let label = RichText::new(format!("■ {}", t.name())).color(base);
-                    if ui.selectable_label(selected, label).clicked() {
-                        ed.sel_terrain = *t;
+            egui::Grid::new("terrain-palette")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    for (i, t) in ALL_TERRAINS.iter().enumerate() {
+                        let base = terrain_swatch(*t);
+                        let selected = ed.sel_terrain == *t;
+                        let label = RichText::new(format!("■ {}", t.name())).color(base);
+                        if ui.selectable_label(selected, label).clicked() {
+                            ed.sel_terrain = *t;
+                        }
+                        if i % 2 == 1 {
+                            ui.end_row();
+                        }
                     }
-                    if i % 2 == 1 {
-                        ui.end_row();
-                    }
-                }
-            });
+                });
         }
         Tool::Height => {
             ui.label("Click: raise · Ctrl+Click: lower");
@@ -448,16 +491,18 @@ pub fn left_panel(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut EditorS
         }
         Tool::Prop => {
             ui.label(RichText::new("Props").strong());
-            egui::Grid::new("prop-palette").num_columns(2).show(ui, |ui| {
-                for (i, p) in ALL_PROPS.iter().enumerate() {
-                    if ui.selectable_label(ed.sel_prop == *p, p.name()).clicked() {
-                        ed.sel_prop = *p;
+            egui::Grid::new("prop-palette")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    for (i, p) in ALL_PROPS.iter().enumerate() {
+                        if ui.selectable_label(ed.sel_prop == *p, p.name()).clicked() {
+                            ed.sel_prop = *p;
+                        }
+                        if i % 2 == 1 {
+                            ui.end_row();
+                        }
                     }
-                    if i % 2 == 1 {
-                        ui.end_row();
-                    }
-                }
-            });
+                });
             ui.small("Ctrl+Click erases.");
         }
         Tool::Event => {
@@ -471,10 +516,14 @@ pub fn left_panel(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut EditorS
     let mut delete_map = None;
     for m in &project.maps {
         ui.horizontal(|ui| {
-            if ui.selectable_label(ed.current_map == m.id, format!("{} · {}", m.id, m.name)).clicked() {
+            if ui
+                .selectable_label(ed.current_map == m.id, format!("{} · {}", m.id, m.name))
+                .clicked()
+            {
                 switch_to = Some(m.id);
             }
-            if project.maps.len() > 1 && ui.small_button("🗑").on_hover_text("Delete map").clicked() {
+            if project.maps.len() > 1 && ui.small_button("🗑").on_hover_text("Delete map").clicked()
+            {
                 delete_map = Some(m.id);
             }
         });
@@ -491,7 +540,9 @@ pub fn left_panel(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut EditorS
     }
     if ui.button("＋ New map").clicked() {
         let id = project.next_map_id();
-        project.maps.push(MapData::new(id, &format!("Map {id}"), 24, 24));
+        project
+            .maps
+            .push(MapData::new(id, &format!("Map {id}"), 24, 24));
         ed.switch_map(project, id);
     }
 }
@@ -528,8 +579,14 @@ pub fn right_panel(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut Editor
 
 fn map_settings_ui(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut EditorState) {
     ui.heading("Map");
-    let troops: Vec<(u32, String)> = project.troops.iter().map(|t| (t.id, t.name.clone())).collect();
-    let Some(map) = project.map_mut(ed.current_map) else { return };
+    let troops: Vec<(u32, String)> = project
+        .troops
+        .iter()
+        .map(|t| (t.id, t.name.clone()))
+        .collect();
+    let Some(map) = project.map_mut(ed.current_map) else {
+        return;
+    };
     let mut changed = false;
 
     ui.horizontal(|ui| {
@@ -539,9 +596,15 @@ fn map_settings_ui(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut Editor
 
     ui.collapsing("Ambience (HD-2D mood)", |ui| {
         let a = &mut map.ambience;
-        changed |= ui.add(egui::Slider::new(&mut a.darkness, 0.0..=1.0).text("Darkness")).changed();
-        changed |= ui.add(egui::Slider::new(&mut a.fog_density, 0.0..=0.12).text("Fog density")).changed();
-        changed |= ui.add(egui::Slider::new(&mut a.bloom_strength, 0.0..=2.0).text("Bloom")).changed();
+        changed |= ui
+            .add(egui::Slider::new(&mut a.darkness, 0.0..=1.0).text("Darkness"))
+            .changed();
+        changed |= ui
+            .add(egui::Slider::new(&mut a.fog_density, 0.0..=0.12).text("Fog density"))
+            .changed();
+        changed |= ui
+            .add(egui::Slider::new(&mut a.bloom_strength, 0.0..=2.0).text("Bloom"))
+            .changed();
         changed |= color_edit(ui, "Sun", &mut a.sun_color);
         changed |= color_edit(ui, "Ambient", &mut a.ambient_color);
         changed |= color_edit(ui, "Fog", &mut a.fog_color);
@@ -549,7 +612,10 @@ fn map_settings_ui(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut Editor
 
     ui.collapsing("Random encounters", |ui| {
         let mut steps = map.encounter_steps as i32;
-        if ui.add(egui::Slider::new(&mut steps, 0..=60).text("Avg steps (0=off)")).changed() {
+        if ui
+            .add(egui::Slider::new(&mut steps, 0..=60).text("Avg steps (0=off)"))
+            .changed()
+        {
             map.encounter_steps = steps as u32;
             changed = true;
         }
@@ -606,10 +672,24 @@ fn selected_event_ui(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut Edit
     let mut changed = false;
     let mut delete = false;
     {
-        let maps_list: Vec<(u32, String)> = project.maps.iter().map(|m| (m.id, m.name.clone())).collect();
-        let items_list: Vec<(u32, String)> = project.items.iter().map(|i| (i.id, i.name.clone())).collect();
-        let troops_list: Vec<(u32, String)> = project.troops.iter().map(|t| (t.id, t.name.clone())).collect();
-        let Some(map) = project.map_mut(map_id) else { return };
+        let maps_list: Vec<(u32, String)> = project
+            .maps
+            .iter()
+            .map(|m| (m.id, m.name.clone()))
+            .collect();
+        let items_list: Vec<(u32, String)> = project
+            .items
+            .iter()
+            .map(|i| (i.id, i.name.clone()))
+            .collect();
+        let troops_list: Vec<(u32, String)> = project
+            .troops
+            .iter()
+            .map(|t| (t.id, t.name.clone()))
+            .collect();
+        let Some(map) = project.map_mut(map_id) else {
+            return;
+        };
         let Some(ev) = map.events.iter_mut().find(|e| e.id == sel) else {
             ed.selected_event = None;
             return;
@@ -628,7 +708,11 @@ fn selected_event_ui(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut Edit
         ui.label(format!("At ({}, {})", ev.x, ev.y));
 
         match &mut ev.kind {
-            EventKind::Npc { sprite, persona, wander } => {
+            EventKind::Npc {
+                sprite,
+                persona,
+                wander,
+            } => {
                 ui.horizontal(|ui| {
                     ui.label("Sprite");
                     let mut s = *sprite as i32;
@@ -639,8 +723,10 @@ fn selected_event_ui(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut Edit
                 });
                 changed |= ui.checkbox(wander, "Wanders around").changed();
                 ui.separator();
-                ui.label(RichText::new("Persona (drives the local LLM)").strong());
-                changed |= ui.checkbox(&mut persona.use_llm, "LLM dialogue enabled").changed();
+                ui.label(RichText::new("Persona (drives the LLM)").strong());
+                changed |= ui
+                    .checkbox(&mut persona.use_llm, "LLM dialogue enabled")
+                    .changed();
                 ui.label("Display name");
                 changed |= ui.text_edit_singleline(&mut persona.name).changed();
                 ui.label("Role (one line)");
@@ -662,7 +748,11 @@ fn selected_event_ui(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut Edit
                 ui.label("Text");
                 changed |= ui.text_edit_multiline(text).changed();
             }
-            EventKind::Transfer { target_map, target_x, target_y } => {
+            EventKind::Transfer {
+                target_map,
+                target_x,
+                target_y,
+            } => {
                 egui::ComboBox::from_label("Target map")
                     .selected_text(
                         maps_list

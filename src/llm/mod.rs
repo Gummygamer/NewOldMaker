@@ -1,11 +1,12 @@
-//! Local LLM NPC dialogue. A worker thread owns the llama.cpp model; the UI
-//! sends `ChatRequest`s and receives streamed tokens via channels, so the
-//! frame loop never blocks. Built without the `llm` feature, everything
-//! degrades to the personas' scripted fallback lines.
+//! LLM-driven NPC dialogue. A worker thread owns the model (a local llama.cpp
+//! GGUF, or an NVIDIA NIM cloud endpoint); the UI sends `ChatRequest`s and
+//! receives streamed tokens via channels, so the frame loop never blocks. Built
+//! without a backend feature, everything degrades to the personas' scripted
+//! fallback lines.
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
-use crate::core::data::{LlmSettings, NpcPersona};
+use crate::core::data::{LlmBackend, LlmSettings, NpcPersona};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LlmStatus {
@@ -53,7 +54,9 @@ pub struct LlmEngine {
     from_worker: Option<Receiver<LlmEvent>>,
     pub status: LlmStatus,
     next_id: u64,
-    configured_path: String,
+    /// Signature of the settings the current worker was built for; a change
+    /// tears the worker down and spins up a fresh one for the new backend.
+    configured_sig: String,
 }
 
 impl LlmEngine {
@@ -63,39 +66,60 @@ impl LlmEngine {
             from_worker: None,
             status: LlmStatus::Off,
             next_id: 1,
-            configured_path: String::new(),
+            configured_sig: String::new(),
         }
     }
 
-    /// Ensure the worker matches the project settings (loads/reloads the model).
+    /// Ensure the worker matches the project settings (loads/reloads the
+    /// backend when the model, endpoint, or key changes).
     pub fn configure(&mut self, settings: &LlmSettings) {
-        if settings.model_path == self.configured_path {
+        let sig = settings.worker_signature();
+        if sig == self.configured_sig {
             return;
         }
-        self.configured_path = settings.model_path.clone();
-        if settings.model_path.is_empty() {
-            self.to_worker = None;
-            self.from_worker = None;
-            self.status = LlmStatus::Off;
+        self.configured_sig = sig;
+        // Tear down any existing worker; each (re)configuration spawns fresh.
+        self.to_worker = None;
+        self.from_worker = None;
+        self.status = LlmStatus::Off;
+
+        if !settings.is_configured() {
             return;
         }
-        #[cfg(feature = "llm")]
-        {
-            let (tx_req, rx_req) = std::sync::mpsc::channel::<WorkerMsg>();
-            let (tx_ev, rx_ev) = std::sync::mpsc::channel::<LlmEvent>();
-            std::thread::Builder::new()
-                .name("nom-llm".into())
-                .spawn(move || backend::worker(rx_req, tx_ev))
-                .expect("spawn llm worker");
-            tx_req.send(WorkerMsg::Load(settings.clone())).ok();
-            self.to_worker = Some(tx_req);
-            self.from_worker = Some(rx_ev);
-            self.status = LlmStatus::Loading;
+
+        match settings.backend {
+            LlmBackend::Local => {
+                #[cfg(feature = "llm")]
+                self.spawn(backend::worker, settings);
+                #[cfg(not(feature = "llm"))]
+                {
+                    self.status = LlmStatus::Error("engine built without the `llm` feature".into());
+                }
+            }
+            LlmBackend::Nim => {
+                #[cfg(feature = "nim")]
+                self.spawn(nim::worker, settings);
+                #[cfg(not(feature = "nim"))]
+                {
+                    self.status = LlmStatus::Error("engine built without the `nim` feature".into());
+                }
+            }
         }
-        #[cfg(not(feature = "llm"))]
-        {
-            self.status = LlmStatus::Error("engine built without the `llm` feature".into());
-        }
+    }
+
+    /// Spawn a backend worker and hand it the initial settings to load.
+    #[cfg(any(feature = "llm", feature = "nim"))]
+    fn spawn(&mut self, worker: fn(Receiver<WorkerMsg>, Sender<LlmEvent>), settings: &LlmSettings) {
+        let (tx_req, rx_req) = std::sync::mpsc::channel::<WorkerMsg>();
+        let (tx_ev, rx_ev) = std::sync::mpsc::channel::<LlmEvent>();
+        std::thread::Builder::new()
+            .name("nom-llm".into())
+            .spawn(move || worker(rx_req, tx_ev))
+            .expect("spawn llm worker");
+        tx_req.send(WorkerMsg::Load(settings.clone())).ok();
+        self.to_worker = Some(tx_req);
+        self.from_worker = Some(rx_ev);
+        self.status = LlmStatus::Loading;
     }
 
     pub fn ready(&self) -> bool {
@@ -171,6 +195,32 @@ pub fn system_prompt(req: &ChatRequest) -> String {
          Keep replies to one to three short sentences.",
     );
     s
+}
+
+/// Assemble the ordered chat messages `(role, content)` sent to whichever
+/// backend serves the reply. An empty history means the NPC greets first.
+/// Roles are the OpenAI/ChatML trio (`system`/`user`/`assistant`), which both
+/// llama.cpp's chat templating and NIM's OpenAI-compatible API understand.
+pub fn build_chat(req: &ChatRequest) -> Vec<(&'static str, String)> {
+    let mut msgs = vec![("system", system_prompt(req))];
+    if req.history.is_empty() {
+        msgs.push((
+            "user",
+            format!(
+                "{} walks up to you. Greet them in character.",
+                req.player_name
+            ),
+        ));
+    }
+    for turn in &req.history {
+        let role = if turn.from_player {
+            "user"
+        } else {
+            "assistant"
+        };
+        msgs.push((role, turn.text.clone()));
+    }
+    msgs
 }
 
 // ---------------------------------------------------------------------------
@@ -385,9 +435,7 @@ impl ReplyFilter {
         let leftover = std::mem::take(&mut self.pending);
         let markup = leftover.starts_with('<') && {
             let body = leftover[1..].strip_prefix('/').unwrap_or(&leftover[1..]);
-            let name_end = body
-                .find(|c: char| !is_name_char(c))
-                .unwrap_or(body.len());
+            let name_end = body.find(|c: char| !is_name_char(c)).unwrap_or(body.len());
             leftover.contains('|') || leftover.contains('=') || is_markup_name(&body[..name_end])
         };
         // A trailing run of backticks is a fence marker that never completed;
@@ -597,9 +645,7 @@ fn match_tag(s: &str) -> Option<(String, TagShape, usize)> {
     if !body.starts_with(|c: char| c.is_ascii_alphabetic()) {
         return None;
     }
-    let name_end = body
-        .find(|c: char| !is_name_char(c))
-        .unwrap_or(body.len());
+    let name_end = body.find(|c: char| !is_name_char(c)).unwrap_or(body.len());
     let name = &body[..name_end];
     let after = &body[name_end..];
     let gt = after.find('>')?;
@@ -658,9 +704,7 @@ fn is_partial_tag(s: &str) -> bool {
     if !body.starts_with(|c: char| c.is_ascii_alphabetic()) {
         return false;
     }
-    let name_end = body
-        .find(|c: char| !is_name_char(c))
-        .unwrap_or(body.len());
+    let name_end = body.find(|c: char| !is_name_char(c)).unwrap_or(body.len());
     let attrs = &body[name_end..];
     if attrs.contains('>') || attrs.contains('\n') || attrs.contains('<') || attrs.contains('|') {
         return false;
@@ -787,27 +831,10 @@ mod backend {
         tx: &Sender<LlmEvent>,
     ) -> anyhow::Result<()> {
         // Assemble the chat and render it through the model's own template.
-        let mut chat = vec![LlamaChatMessage::new(
-            "system".into(),
-            super::system_prompt(req),
-        )?];
-        if req.history.is_empty() {
-            chat.push(LlamaChatMessage::new(
-                "user".into(),
-                format!(
-                    "{} walks up to you. Greet them in character.",
-                    req.player_name
-                ),
-            )?);
-        }
-        for turn in &req.history {
-            let role = if turn.from_player {
-                "user"
-            } else {
-                "assistant"
-            };
-            chat.push(LlamaChatMessage::new(role.into(), turn.text.clone())?);
-        }
+        let chat = super::build_chat(req)
+            .into_iter()
+            .map(|(role, content)| LlamaChatMessage::new(role.into(), content))
+            .collect::<Result<Vec<_>, _>>()?;
         let prompt = render_prompt(model, &chat)?;
 
         let mut ctx_params = LlamaContextParams::default()
@@ -898,6 +925,152 @@ mod backend {
     }
 }
 
+// ---------------------------------------------------------------------------
+// NVIDIA NIM worker (feature = "nim")
+// ---------------------------------------------------------------------------
+
+/// Talks to an NVIDIA NIM endpoint, which speaks the OpenAI-compatible
+/// `/chat/completions` protocol. There is no model to load — a hosted endpoint
+/// is "ready" as soon as we have an API key — so `Load` just reports status and
+/// each `Chat` streams a Server-Sent-Events response, reusing the same
+/// [`ReplyFilter`] and [`system_prompt`] as the local backend.
+#[cfg(feature = "nim")]
+mod nim {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+
+    pub(super) fn worker(rx: Receiver<WorkerMsg>, tx: Sender<LlmEvent>) {
+        let mut settings = LlmSettings::default();
+        while let Ok(msg) = rx.recv() {
+            match msg {
+                WorkerMsg::Load(s) => {
+                    settings = s;
+                    match api_key(&settings) {
+                        Some(_) => {
+                            tx.send(LlmEvent::Status(LlmStatus::Ready(
+                                settings.nim_model.clone(),
+                            )))
+                            .ok();
+                        }
+                        None => {
+                            tx.send(LlmEvent::Status(LlmStatus::Error(
+                                "no NVIDIA API key (set it in the LLM tab or the \
+                                 NVIDIA_API_KEY environment variable)"
+                                    .into(),
+                            )))
+                            .ok();
+                        }
+                    }
+                }
+                WorkerMsg::Chat(req) => {
+                    if let Err(e) = run_chat(&settings, &req, &tx) {
+                        tx.send(LlmEvent::Error {
+                            id: req.id,
+                            msg: e.to_string(),
+                        })
+                        .ok();
+                    }
+                }
+            }
+        }
+    }
+
+    /// The API key from settings, falling back to the `NVIDIA_API_KEY` env var.
+    fn api_key(settings: &LlmSettings) -> Option<String> {
+        if !settings.nim_api_key.is_empty() {
+            return Some(settings.nim_api_key.clone());
+        }
+        std::env::var("NVIDIA_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+    }
+
+    fn run_chat(
+        settings: &LlmSettings,
+        req: &ChatRequest,
+        tx: &Sender<LlmEvent>,
+    ) -> anyhow::Result<()> {
+        let key = api_key(settings).ok_or_else(|| anyhow::anyhow!("no NVIDIA API key"))?;
+        let url = format!(
+            "{}/chat/completions",
+            settings.nim_base_url.trim_end_matches('/')
+        );
+
+        // OpenAI-style request body with streaming enabled.
+        let messages: Vec<serde_json::Value> = super::build_chat(req)
+            .into_iter()
+            .map(|(role, content)| serde_json::json!({ "role": role, "content": content }))
+            .collect();
+        let body = serde_json::json!({
+            "model": settings.nim_model,
+            "messages": messages,
+            "temperature": req.temperature.clamp(0.05, 2.0),
+            "max_tokens": req.max_tokens,
+            "stream": true,
+        });
+
+        let resp = match ureq::post(&url)
+            .set("Authorization", &format!("Bearer {key}"))
+            .set("Accept", "text/event-stream")
+            .send_json(body)
+        {
+            Ok(r) => r,
+            // Surface the endpoint's own error message (bad key, unknown model…).
+            Err(ureq::Error::Status(code, r)) => {
+                let detail = r.into_string().unwrap_or_default();
+                anyhow::bail!("NIM HTTP {code}: {}", detail.trim());
+            }
+            Err(e) => anyhow::bail!("NIM request failed: {e}"),
+        };
+
+        // Parse the SSE stream: `data: {json}` lines terminated by `data: [DONE]`.
+        // Each chunk carries an incremental `choices[0].delta.content` piece.
+        let mut filter = ReplyFilter::new();
+        let reader = BufReader::new(resp.into_reader());
+        for line in reader.lines() {
+            let payload = match line?.strip_prefix("data:") {
+                Some(p) => p.trim().to_string(),
+                None => continue,
+            };
+            if payload.is_empty() {
+                continue;
+            }
+            if payload == "[DONE]" {
+                break;
+            }
+            let Ok(chunk) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                continue;
+            };
+            let delta = chunk["choices"][0]["delta"]["content"]
+                .as_str()
+                .unwrap_or("");
+            if delta.is_empty() {
+                continue;
+            }
+            let visible = filter.push(delta);
+            if !visible.is_empty() {
+                tx.send(LlmEvent::Token {
+                    id: req.id,
+                    text: visible,
+                })?;
+            }
+            // NPC lines are short; stop at a blank line in the visible reply.
+            if filter.shown().contains("\n\n") {
+                break;
+            }
+        }
+        let tail = filter.finish();
+        if !tail.is_empty() {
+            tx.send(LlmEvent::Token {
+                id: req.id,
+                text: tail,
+            })?;
+        }
+        tx.send(LlmEvent::Done { id: req.id })?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod filter_tests {
     use super::*;
@@ -969,7 +1142,8 @@ mod filter_tests {
     /// is bare text after the closer (the leak seen in NPC chat bubbles).
     #[test]
     fn gemma4_asymmetric_tags_with_reasoning() {
-        let raw = "<|channel>thought\nThe player approaches; be gruff.\n<channel|>Hey. What do you want?";
+        let raw =
+            "<|channel>thought\nThe player approaches; be gruff.\n<channel|>Hey. What do you want?";
         for chunk in [1, 3, 64] {
             assert_eq!(run(raw, chunk), "Hey. What do you want?");
         }
@@ -1049,7 +1223,10 @@ mod filter_tests {
     /// legitimate dialogue.
     #[test]
     fn unknown_bare_tag_is_text() {
-        assert_eq!(run("press <Enter> to continue", 2), "press <Enter> to continue");
+        assert_eq!(
+            run("press <Enter> to continue", 2),
+            "press <Enter> to continue"
+        );
     }
 
     /// A truncated markup tag at the very end of generation is dropped
@@ -1167,6 +1344,98 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(30));
         }
         println!("NPC reply: {reply}");
+        assert!(
+            reply.trim().len() > 5,
+            "expected a real reply, got: {reply:?}"
+        );
+        assert!(
+            !reply.contains("<|") && !reply.contains("|>"),
+            "control markup leaked into the reply: {reply:?}"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "nim"))]
+mod nim_tests {
+    use super::*;
+    use crate::core::data::LlmBackend;
+
+    /// End-to-end: hit the real NVIDIA NIM endpoint and require a streamed
+    /// in-character reply. Ignored by default (needs network + a key).
+    /// Run with `cargo test nim_end_to_end -- --ignored`, with `NVIDIA_API_KEY`
+    /// set (or `NOM_TEST_NIM_MODEL` to try another model).
+    #[test]
+    #[ignore]
+    fn nim_end_to_end() {
+        if std::env::var("NVIDIA_API_KEY")
+            .map(|k| k.is_empty())
+            .unwrap_or(true)
+        {
+            eprintln!("NVIDIA_API_KEY not set; skipping");
+            return;
+        }
+        let model = std::env::var("NOM_TEST_NIM_MODEL")
+            .unwrap_or_else(|_| "meta/llama-3.1-8b-instruct".into());
+
+        let mut engine = LlmEngine::new();
+        engine.configure(&crate::core::data::LlmSettings {
+            backend: LlmBackend::Nim,
+            nim_model: model,
+            ..Default::default()
+        });
+
+        // A hosted endpoint reports ready as soon as the worker starts.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !engine.ready() {
+            engine.poll();
+            if let LlmStatus::Error(e) = &engine.status {
+                panic!("NIM backend failed to configure: {e}");
+            }
+            assert!(std::time::Instant::now() < deadline, "configure timed out");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let persona = crate::core::data::NpcPersona {
+            name: "Old Marta".into(),
+            role: "the village apothecary".into(),
+            personality: "Warm, folksy, calls everyone 'dearie'.".into(),
+            knowledge: "The cave north of the village is full of slimes.".into(),
+            constraints: String::new(),
+            fallback_lines: vec![],
+            use_llm: true,
+        };
+        let id = engine
+            .request(ChatRequest {
+                id: 0,
+                persona,
+                game_title: "Untitled Tale".into(),
+                location: "Riverside Meadow".into(),
+                player_name: "Aldric".into(),
+                history: vec![ChatTurn {
+                    from_player: true,
+                    text: "What's in the cave to the north?".into(),
+                }],
+                max_tokens: 64,
+                temperature: 0.8,
+            })
+            .expect("request accepted");
+
+        let mut reply = String::new();
+        let mut done = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !done {
+            for ev in engine.poll() {
+                match ev {
+                    LlmEvent::Token { id: i, text } if i == id => reply.push_str(&text),
+                    LlmEvent::Done { id: i } if i == id => done = true,
+                    LlmEvent::Error { msg, .. } => panic!("generation failed: {msg}"),
+                    _ => {}
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "generation timed out");
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        println!("NIM NPC reply: {reply}");
         assert!(
             reply.trim().len() > 5,
             "expected a real reply, got: {reply:?}"
