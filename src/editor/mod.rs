@@ -8,6 +8,7 @@ use std::sync::Arc;
 use eframe::egui::{self, Color32, RichText};
 use glam::Vec3;
 
+use crate::core::aigen::GenTarget;
 use crate::core::data::*;
 use crate::gfx::camera::OrbitCamera;
 use crate::gfx::mesh::{SPRITE_HORIZONTAL, SPRITE_UNLIT, pick_tile, tile_top_y};
@@ -28,6 +29,47 @@ pub struct UndoEntry {
     events: Vec<EventData>,
 }
 
+/// An in-flight LLM content-generation request. Tokens stream into `buffer`;
+/// when the request finishes, the buffer is parsed and spliced into the project.
+pub struct GenJob {
+    pub id: u64,
+    pub target: GenTarget,
+    pub buffer: String,
+}
+
+/// UI + async state for the database's "AI" generation tab.
+pub struct GenState {
+    pub target: GenTarget,
+    pub prompt: String,
+    /// How many elements to ask for (ignored for maps).
+    pub count: u32,
+    /// Set by the AI tab when the designer clicks Generate; consumed by `App`.
+    pub submit: bool,
+    /// The request currently streaming, if any.
+    pub job: Option<GenJob>,
+    /// Last summary or error to show the designer.
+    pub status: Option<String>,
+}
+
+impl Default for GenState {
+    fn default() -> Self {
+        GenState {
+            target: GenTarget::Monsters,
+            prompt: String::new(),
+            count: 3,
+            submit: false,
+            job: None,
+            status: None,
+        }
+    }
+}
+
+impl GenState {
+    pub fn busy(&self) -> bool {
+        self.job.is_some()
+    }
+}
+
 pub struct EditorState {
     pub current_map: u32,
     pub camera: OrbitCamera,
@@ -42,6 +84,7 @@ pub struct EditorState {
     pub preview_fx: bool,
     pub show_database: bool,
     pub db_tab: database::DbTab,
+    pub genai: GenState,
     pub undo: Vec<UndoEntry>,
     stroke_active: bool,
     last_tile: Option<(i32, i32)>,
@@ -73,6 +116,7 @@ impl EditorState {
             preview_fx: true,
             show_database: false,
             db_tab: database::DbTab::Actors,
+            genai: GenState::default(),
             undo: Vec::new(),
             stroke_active: false,
             last_tile: None,
@@ -544,6 +588,15 @@ pub fn left_panel(ui: &mut egui::Ui, project: &mut ProjectData, ed: &mut EditorS
             .maps
             .push(MapData::new(id, &format!("Map {id}"), 24, 24));
         ed.switch_map(project, id);
+    }
+    if ui
+        .button("✨ Generate map…")
+        .on_hover_text("Design a map with the connected LLM (Database → AI)")
+        .clicked()
+    {
+        ed.show_database = true;
+        ed.db_tab = database::DbTab::Ai;
+        ed.genai.target = GenTarget::Map;
     }
 }
 

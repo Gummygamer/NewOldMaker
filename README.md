@@ -25,6 +25,9 @@ required — all placeholder pixel art is generated procedurally at startup.
 - Events: NPCs, signs, transfers, chests, battle triggers, heal points
 - Database: actors (stats/growth/learnsets), skills (elements, multi-hit,
   buffs), items, enemies (weaknesses + shields), troops, system settings
+- **AI generation** (Database → ✨ AI): describe what you want and the
+  connected LLM drafts heroes, monsters, skills, troops, items, or a whole
+  map, appended straight into your project
 - Undo (Ctrl+Z), autosaveable single-file JSON project format
 
 **Playtest (F5)**
@@ -88,6 +91,28 @@ To let NPCs talk through NVIDIA's hosted models rather than a local one, set
 The endpoint is OpenAI-compatible, so replies stream in exactly as they do for
 the local backend, through the same in-character prompt and markup filter.
 
+## Generating content with the LLM
+
+The same backend that voices NPCs can also *author* content. Open **Database →
+✨ AI**, choose what to create (Heroes, Monsters, Skills, Troops, Items, or a
+Map), type a one-line brief — e.g. *"undead haunting a swamp, weak to fire and
+light"* — pick how many, and press **✨ Generate**. The model returns strict
+JSON that's parsed and appended to your project:
+
+- Cross-references are kept valid: a hero's learnset, an enemy's skills and a
+  troop's members are filtered down to ids that actually exist (generate
+  Skills before Monsters, Monsters before Troops for the richest results).
+- **Maps** come back as a compact ASCII grid (a fixed terrain/prop/height
+  legend) that decodes into real tiles, ambience and encounter settings; the
+  editor switches to the new map when it's done.
+- Names and descriptions follow the game's language; enum values stay English.
+
+Generation runs on whichever backend is configured in the LLM tab (local GGUF
+or NIM) and streams in the background — the status line under the button shows
+progress and a summary of what was added. Parsing is deliberately forgiving,
+but small local models produce cleaner JSON at lower temperatures; a 7–8 B NIM
+model gives the most reliable structured output.
+
 ## Quick tour
 
 1. `cargo run --release` — opens the sample project: a riverside village and
@@ -121,7 +146,8 @@ a frame.
 
 ```
 src/
-  core/      data model, defaults (sample project), JSON I/O
+  core/      data model, defaults (sample project), JSON I/O,
+             aigen (LLM-driven map/database generation)
   gfx/       procedural pixel-art atlas, camera, terrain mesh builder,
              wgpu HD-2D renderer + WGSL shaders (scene, bloom, tilt-shift)
   editor/    3D-viewport map editor, database window

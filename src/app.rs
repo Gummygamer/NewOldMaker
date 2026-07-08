@@ -8,16 +8,17 @@ use std::sync::{Arc, OnceLock};
 use eframe::egui;
 use glam::Vec3;
 
+use crate::core::aigen;
 use crate::core::data::*;
 use crate::core::defaults::default_project;
 use crate::core::io;
-use crate::editor::{self, EditorState};
+use crate::editor::{self, EditorState, GenJob};
 use crate::game::Game;
 use crate::gfx::mesh::SPRITE_HORIZONTAL;
 use crate::gfx::pixelart::{build_atlas, Atlas, CHAR_FRAMES};
 use crate::gfx::renderer::{Hd2dCallback, Hd2dRenderer};
 use crate::gfx::scene;
-use crate::llm::{ChatTurn, LlmEngine, LlmStatus};
+use crate::llm::{ChatTurn, GenRequest, LlmEngine, LlmEvent, LlmStatus};
 
 static ATLAS: OnceLock<Arc<Atlas>> = OnceLock::new();
 static REVISION: AtomicU64 = AtomicU64::new(1);
@@ -590,6 +591,86 @@ impl App {
             self.stop_game();
         }
     }
+
+    // -----------------------------------------------------------------
+    // AI content generation (Database → ✨ AI)
+    // -----------------------------------------------------------------
+
+    /// Feed streamed LLM events into the active generation job; when it finishes,
+    /// parse the JSON and splice the new content into the project.
+    fn process_gen_events(&mut self, events: Vec<LlmEvent>) {
+        let Some(job) = self.editor.genai.job.as_mut() else {
+            return;
+        };
+        let mut done = false;
+        let mut errored = None;
+        for ev in events {
+            match ev {
+                LlmEvent::Token { id, text } if id == job.id => job.buffer.push_str(&text),
+                LlmEvent::Done { id } if id == job.id => done = true,
+                LlmEvent::Error { id, msg } if id == job.id => errored = Some(msg),
+                _ => {}
+            }
+        }
+        if let Some(msg) = errored {
+            self.editor.genai.status = Some(format!("Generation failed: {msg}"));
+            self.editor.genai.job = None;
+            return;
+        }
+        if !done {
+            return;
+        }
+        let job = self.editor.genai.job.take().expect("job present");
+        match aigen::apply(job.target, &mut self.project, &job.buffer) {
+            Ok(applied) => {
+                if let Some(id) = applied.new_map {
+                    self.editor.switch_map(&self.project, id);
+                } else {
+                    self.editor.sync_map(&self.project);
+                }
+                self.editor.genai.status = Some(applied.summary.clone());
+                self.toast(applied.summary);
+            }
+            Err(e) => self.editor.genai.status = Some(e),
+        }
+    }
+
+    /// If the AI tab requested a generation this frame, build the prompt and
+    /// dispatch it to the LLM worker.
+    fn start_gen_if_requested(&mut self) {
+        if !self.editor.genai.submit {
+            return;
+        }
+        self.editor.genai.submit = false;
+        if self.editor.genai.job.is_some() {
+            return;
+        }
+        let target = self.editor.genai.target;
+        let count = self.editor.genai.count.clamp(1, 12);
+        let language = self.project.system.language;
+        let req = GenRequest {
+            id: 0,
+            system: aigen::system_prompt(target, &self.project, language),
+            prompt: aigen::user_prompt(target, count, &self.editor.genai.prompt),
+            max_tokens: target.max_tokens(count),
+            // Structured output wants less randomness than chatty dialogue.
+            temperature: (self.project.llm.temperature * 0.6).clamp(0.1, 0.9),
+        };
+        match self.llm.generate(req) {
+            Some(id) => {
+                self.editor.genai.job = Some(GenJob {
+                    id,
+                    target,
+                    buffer: String::new(),
+                });
+                self.editor.genai.status = Some(format!("Generating {}…", target.label()));
+            }
+            None => {
+                self.editor.genai.status =
+                    Some("LLM is not ready. Configure a backend in the LLM tab.".into());
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -605,8 +686,9 @@ impl eframe::App for App {
 
         self.llm.configure(&self.project.llm);
         if self.game.is_none() {
-            // Keep the LLM status fresh even outside playtest.
-            self.llm.poll();
+            // Keep the LLM status fresh and drive any in-flight AI generation.
+            let events = self.llm.poll();
+            self.process_gen_events(events);
         }
 
         // Global shortcuts.
@@ -651,7 +733,15 @@ impl eframe::App for App {
             if self.editor.show_database {
                 let mut open = true;
                 let mut tab = self.editor.db_tab;
-                editor::database::database_window(&ctx, &mut self.project, &mut open, &mut tab);
+                let llm_ready = self.llm.ready();
+                editor::database::database_window(
+                    &ctx,
+                    &mut self.project,
+                    &mut open,
+                    &mut tab,
+                    &mut self.editor.genai,
+                    llm_ready,
+                );
                 self.editor.db_tab = tab;
                 if !open {
                     self.editor.show_database = false;
@@ -659,6 +749,8 @@ impl eframe::App for App {
                 // Database edits can touch the current map's troops etc.
                 // (tiles are untouched, so no resync needed here)
             }
+            // Dispatch an AI generation request queued by the database's AI tab.
+            self.start_gen_if_requested();
         }
 
         // Toast.

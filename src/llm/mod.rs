@@ -38,6 +38,22 @@ pub struct ChatRequest {
     pub language: Language,
 }
 
+/// A one-shot content-generation request (maps, database elements). Unlike a
+/// [`ChatRequest`], the reply is *not* run through [`ReplyFilter`] — the caller
+/// wants the raw text (JSON) — and a bigger token budget is used. The streamed
+/// pieces arrive as [`LlmEvent::Token`] and completion as [`LlmEvent::Done`],
+/// keyed by `id`, exactly like a chat; the caller accumulates them itself.
+#[derive(Clone, Debug)]
+pub struct GenRequest {
+    pub id: u64,
+    /// System prompt: the schema and rules the model must follow.
+    pub system: String,
+    /// User prompt: the designer's request plus what to produce.
+    pub prompt: String,
+    pub max_tokens: u32,
+    pub temperature: f32,
+}
+
 #[derive(Clone, Debug)]
 pub enum LlmEvent {
     Status(LlmStatus),
@@ -49,6 +65,7 @@ pub enum LlmEvent {
 enum WorkerMsg {
     Load(LlmSettings),
     Chat(Box<ChatRequest>),
+    Generate(Box<GenRequest>),
 }
 
 pub struct LlmEngine {
@@ -141,6 +158,20 @@ impl LlmEngine {
         Some(id)
     }
 
+    /// Queue a content-generation request; returns its id (raw text arrives via
+    /// `poll` as [`LlmEvent::Token`]s, terminated by [`LlmEvent::Done`]).
+    pub fn generate(&mut self, mut req: GenRequest) -> Option<u64> {
+        let tx = self.to_worker.as_ref()?;
+        if !self.ready() {
+            return None;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        req.id = id;
+        tx.send(WorkerMsg::Generate(Box::new(req))).ok()?;
+        Some(id)
+    }
+
     /// Drain pending events; call once per frame.
     pub fn poll(&mut self) -> Vec<LlmEvent> {
         let mut events = Vec::new();
@@ -227,6 +258,15 @@ pub fn build_chat(req: &ChatRequest) -> Vec<(&'static str, String)> {
         msgs.push((role, turn.text.clone()));
     }
     msgs
+}
+
+/// Assemble the two-message (system + user) chat for a [`GenRequest`], in the
+/// same `(role, content)` shape [`build_chat`] produces.
+pub fn build_gen_chat(req: &GenRequest) -> Vec<(&'static str, String)> {
+    vec![
+        ("system", req.system.clone()),
+        ("user", req.prompt.clone()),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -790,6 +830,23 @@ mod backend {
                         .ok();
                     }
                 }
+                WorkerMsg::Generate(req) => {
+                    let Some(m) = &model else {
+                        tx.send(LlmEvent::Error {
+                            id: req.id,
+                            msg: "no model loaded".into(),
+                        })
+                        .ok();
+                        continue;
+                    };
+                    if let Err(e) = run_generate(&backend, m, &settings, &req, &tx) {
+                        tx.send(LlmEvent::Error {
+                            id: req.id,
+                            msg: e.to_string(),
+                        })
+                        .ok();
+                    }
+                }
             }
         }
     }
@@ -929,6 +986,91 @@ mod backend {
         tx.send(LlmEvent::Done { id: req.id })?;
         Ok(())
     }
+
+    /// Run a content-generation request: the raw (unfiltered) text is streamed
+    /// back token by token. A wider context and larger reply budget are used
+    /// than for dialogue, and control tokens are decoded plainly so the JSON
+    /// body arrives intact.
+    fn run_generate(
+        backend: &LlamaBackend,
+        model: &LlamaModel,
+        settings: &LlmSettings,
+        req: &GenRequest,
+        tx: &Sender<LlmEvent>,
+    ) -> anyhow::Result<()> {
+        let chat = super::build_gen_chat(req)
+            .into_iter()
+            .map(|(role, content)| LlamaChatMessage::new(role.into(), content))
+            .collect::<Result<Vec<_>, _>>()?;
+        let prompt = render_prompt(model, &chat)?;
+
+        // Generation needs room for a long JSON reply, so widen the window
+        // beyond the (dialogue-sized) project setting when necessary.
+        let ctx_tokens = settings.context_tokens.max(4096);
+        let mut ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(ctx_tokens))
+            .with_n_batch(N_BATCH);
+        if settings.threads > 0 {
+            ctx_params = ctx_params.with_n_threads(settings.threads as i32);
+        }
+        let mut ctx = model.new_context(backend, ctx_params)?;
+
+        let mut tokens = model.str_to_token(&prompt, AddBos::Never)?;
+        let budget = (ctx_tokens as usize).saturating_sub(req.max_tokens as usize + 8);
+        if tokens.len() > budget {
+            // Keep the head (schema/system prompt) and the tail (the request).
+            let keep_head = budget / 2;
+            let keep_tail = budget - keep_head;
+            let tail_start = tokens.len() - keep_tail;
+            let mut clipped = tokens[..keep_head].to_vec();
+            clipped.extend_from_slice(&tokens[tail_start..]);
+            tokens = clipped;
+        }
+
+        let mut batch = LlamaBatch::new(N_BATCH as usize, 1);
+        let mut pos = 0i32;
+        for chunk in tokens.chunks(N_BATCH as usize) {
+            batch.clear();
+            for (i, tok) in chunk.iter().enumerate() {
+                let is_last = pos as usize + i + 1 == tokens.len();
+                batch.add(*tok, pos + i as i32, &[0], is_last)?;
+            }
+            ctx.decode(&mut batch)?;
+            pos += chunk.len() as i32;
+        }
+
+        let seed = (req.id as u32).wrapping_mul(2654435761).wrapping_add(7);
+        let mut sampler = LlamaSampler::chain_simple([
+            LlamaSampler::penalties(64, 1.1, 0.0, 0.0),
+            LlamaSampler::temp(req.temperature.clamp(0.05, 2.0)),
+            LlamaSampler::dist(seed),
+        ]);
+
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        for _ in 0..req.max_tokens {
+            let token = sampler.sample(&ctx, -1);
+            sampler.accept(token);
+            if model.is_eog_token(token) {
+                break;
+            }
+            // `special: false`: we want the plain JSON body, not template tokens.
+            let piece = model
+                .token_to_piece(token, &mut decoder, false, None)
+                .unwrap_or_default();
+            if !piece.is_empty() {
+                tx.send(LlmEvent::Token {
+                    id: req.id,
+                    text: piece,
+                })?;
+            }
+            batch.clear();
+            batch.add(token, pos, &[0], true)?;
+            pos += 1;
+            ctx.decode(&mut batch)?;
+        }
+        tx.send(LlmEvent::Done { id: req.id })?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -970,6 +1112,15 @@ mod nim {
                 }
                 WorkerMsg::Chat(req) => {
                     if let Err(e) = run_chat(&settings, &req, &tx) {
+                        tx.send(LlmEvent::Error {
+                            id: req.id,
+                            msg: e.to_string(),
+                        })
+                        .ok();
+                    }
+                }
+                WorkerMsg::Generate(req) => {
+                    if let Err(e) = run_generate(&settings, &req, &tx) {
                         tx.send(LlmEvent::Error {
                             id: req.id,
                             msg: e.to_string(),
@@ -1070,6 +1221,75 @@ mod nim {
             tx.send(LlmEvent::Token {
                 id: req.id,
                 text: tail,
+            })?;
+        }
+        tx.send(LlmEvent::Done { id: req.id })?;
+        Ok(())
+    }
+
+    /// Content generation over the same OpenAI-compatible streaming endpoint,
+    /// but the delta pieces are forwarded raw (no [`ReplyFilter`]) so the JSON
+    /// body is preserved.
+    fn run_generate(
+        settings: &LlmSettings,
+        req: &GenRequest,
+        tx: &Sender<LlmEvent>,
+    ) -> anyhow::Result<()> {
+        let key = api_key(settings).ok_or_else(|| anyhow::anyhow!("no NVIDIA API key"))?;
+        let url = format!(
+            "{}/chat/completions",
+            settings.nim_base_url.trim_end_matches('/')
+        );
+
+        let messages: Vec<serde_json::Value> = super::build_gen_chat(req)
+            .into_iter()
+            .map(|(role, content)| serde_json::json!({ "role": role, "content": content }))
+            .collect();
+        let body = serde_json::json!({
+            "model": settings.nim_model,
+            "messages": messages,
+            "temperature": req.temperature.clamp(0.05, 2.0),
+            "max_tokens": req.max_tokens,
+            "stream": true,
+        });
+
+        let resp = match ureq::post(&url)
+            .set("Authorization", &format!("Bearer {key}"))
+            .set("Accept", "text/event-stream")
+            .send_json(body)
+        {
+            Ok(r) => r,
+            Err(ureq::Error::Status(code, r)) => {
+                let detail = r.into_string().unwrap_or_default();
+                anyhow::bail!("NIM HTTP {code}: {}", detail.trim());
+            }
+            Err(e) => anyhow::bail!("NIM request failed: {e}"),
+        };
+
+        let reader = BufReader::new(resp.into_reader());
+        for line in reader.lines() {
+            let payload = match line?.strip_prefix("data:") {
+                Some(p) => p.trim().to_string(),
+                None => continue,
+            };
+            if payload.is_empty() {
+                continue;
+            }
+            if payload == "[DONE]" {
+                break;
+            }
+            let Ok(chunk) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                continue;
+            };
+            let delta = chunk["choices"][0]["delta"]["content"]
+                .as_str()
+                .unwrap_or("");
+            if delta.is_empty() {
+                continue;
+            }
+            tx.send(LlmEvent::Token {
+                id: req.id,
+                text: delta.to_string(),
             })?;
         }
         tx.send(LlmEvent::Done { id: req.id })?;
@@ -1277,6 +1497,97 @@ mod filter_tests {
 #[cfg(all(test, feature = "llm"))]
 mod tests {
     use super::*;
+
+    /// Load the real GGUF model and wait for it to be ready, or return `None`
+    /// (skip) when it isn't downloaded. Shared by the end-to-end tests.
+    fn ready_engine() -> Option<LlmEngine> {
+        let path = std::env::var("NOM_TEST_MODEL")
+            .unwrap_or_else(|_| "models/qwen2.5-0.5b-instruct-q4_k_m.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("model not downloaded; skipping (run scripts/get-model.sh)");
+            return None;
+        }
+        let mut engine = LlmEngine::new();
+        engine.configure(&crate::core::data::LlmSettings {
+            model_path: path,
+            ..Default::default()
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !engine.ready() {
+            engine.poll();
+            if let LlmStatus::Error(e) = &engine.status {
+                panic!("model failed to load: {e}");
+            }
+            assert!(std::time::Instant::now() < deadline, "model load timed out");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Some(engine)
+    }
+
+    /// Drive one generation request to completion and return the raw reply.
+    fn run_gen(engine: &mut LlmEngine, req: GenRequest) -> String {
+        let id = engine.generate(req).expect("generation accepted");
+        let mut out = String::new();
+        let mut done = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+        while !done {
+            for ev in engine.poll() {
+                match ev {
+                    LlmEvent::Token { id: i, text } if i == id => out.push_str(&text),
+                    LlmEvent::Done { id: i } if i == id => done = true,
+                    LlmEvent::Error { msg, .. } => panic!("generation failed: {msg}"),
+                    _ => {}
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "generation timed out");
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        out
+    }
+
+    /// End-to-end: ask the real model to author skills and a map, then parse the
+    /// output through [`crate::core::aigen`] and require valid content.
+    /// Ignored by default — run with `cargo test gen_end_to_end -- --ignored`.
+    #[test]
+    #[ignore]
+    fn gen_end_to_end() {
+        use crate::core::aigen::{self, GenTarget};
+        let Some(mut engine) = ready_engine() else {
+            return;
+        };
+        let mut project = crate::core::defaults::default_project(Language::English);
+
+        // Skills: a batch of new entries appended after the defaults.
+        let before = project.skills.len();
+        let req = GenRequest {
+            id: 0,
+            system: aigen::system_prompt(GenTarget::Skills, &project, Language::English),
+            prompt: aigen::user_prompt(GenTarget::Skills, 3, "a set of wind and earth spells"),
+            max_tokens: GenTarget::Skills.max_tokens(3),
+            temperature: 0.4,
+        };
+        let raw = run_gen(&mut engine, req);
+        let applied = aigen::apply(GenTarget::Skills, &mut project, &raw)
+            .unwrap_or_else(|e| panic!("skill JSON rejected: {e}\n---\n{raw}"));
+        assert!(project.skills.len() > before, "no skills were added");
+        assert!(applied.summary.starts_with("Added"));
+
+        // Map: decodes into a real grid the editor can open.
+        let req = GenRequest {
+            id: 0,
+            system: aigen::system_prompt(GenTarget::Map, &project, Language::English),
+            prompt: aigen::user_prompt(GenTarget::Map, 1, "a small grassy clearing with a pond"),
+            max_tokens: GenTarget::Map.max_tokens(1),
+            temperature: 0.4,
+        };
+        let raw = run_gen(&mut engine, req);
+        let applied = aigen::apply(GenTarget::Map, &mut project, &raw)
+            .unwrap_or_else(|e| panic!("map JSON rejected: {e}\n---\n{raw}"));
+        let id = applied.new_map.expect("a new map id");
+        let m = project.map(id).expect("map present");
+        assert_eq!(m.tiles.len(), (m.width * m.height) as usize);
+        println!("generated map {}×{} '{}'", m.width, m.height, m.name);
+    }
 
     /// End-to-end: load the real GGUF model (if present in ./models), run a
     /// persona chat, and require a streamed in-character reply.

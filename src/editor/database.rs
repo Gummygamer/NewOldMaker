@@ -2,6 +2,8 @@
 
 use eframe::egui::{self, RichText};
 
+use super::GenState;
+use crate::core::aigen::GenTarget;
 use crate::core::data::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -13,6 +15,7 @@ pub enum DbTab {
     Troops,
     System,
     Llm,
+    Ai,
 }
 
 pub fn database_window(
@@ -20,6 +23,8 @@ pub fn database_window(
     project: &mut ProjectData,
     open: &mut bool,
     tab: &mut DbTab,
+    genai: &mut GenState,
+    llm_ready: bool,
 ) {
     egui::Window::new("🗄 Database")
         .open(open)
@@ -33,6 +38,7 @@ pub fn database_window(
                 ui.selectable_value(tab, DbTab::Troops, "Troops");
                 ui.selectable_value(tab, DbTab::System, "System");
                 ui.selectable_value(tab, DbTab::Llm, "LLM");
+                ui.selectable_value(tab, DbTab::Ai, RichText::new("✨ AI").strong());
             });
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| match tab {
@@ -43,6 +49,7 @@ pub fn database_window(
                 DbTab::Troops => troops_tab(ui, project),
                 DbTab::System => system_tab(ui, project),
                 DbTab::Llm => llm_tab(ui, project),
+                DbTab::Ai => ai_tab(ui, project, genai, llm_ready),
             });
         });
 }
@@ -611,4 +618,109 @@ fn llm_tab(ui: &mut egui::Ui, project: &mut ProjectData) {
         project.llm.max_reply_tokens = max as u32;
     }
     ui.add(egui::Slider::new(&mut project.llm.temperature, 0.1..=1.5).text("Temperature"));
+}
+
+// ---------------------------------------------------------------------------
+
+/// The "✨ AI" tab: describe what you want and let the connected LLM draft new
+/// database elements or a whole map, appended to the project.
+fn ai_tab(ui: &mut egui::Ui, project: &mut ProjectData, genai: &mut GenState, llm_ready: bool) {
+    ui.label(RichText::new("Generate content with the connected LLM").strong());
+    ui.small(
+        "Describe what you want; the model drafts it and it's added to your project. \
+         Uses the backend configured in the LLM tab.",
+    );
+    ui.add_space(4.0);
+
+    egui::ComboBox::from_label("Create")
+        .selected_text(genai.target.label())
+        .show_ui(ui, |ui| {
+            for t in GenTarget::ALL {
+                ui.selectable_value(&mut genai.target, t, t.label());
+            }
+        });
+
+    if !genai.target.is_map() {
+        let mut count = genai.count as i32;
+        if ui
+            .add(egui::Slider::new(&mut count, 1..=8).text("How many"))
+            .changed()
+        {
+            genai.count = count as u32;
+        }
+    }
+
+    ui.label(match genai.target {
+        GenTarget::Map => "Describe the map (biome, mood, layout):",
+        GenTarget::Heroes => "Describe the heroes (class, personality, role):",
+        GenTarget::Monsters => "Describe the monsters (theme, difficulty):",
+        GenTarget::Skills => "Describe the skills (element, style):",
+        GenTarget::Troops => "Describe the encounters to assemble:",
+        GenTarget::Items => "Describe the items:",
+    });
+    ui.add(
+        egui::TextEdit::multiline(&mut genai.prompt)
+            .hint_text(prompt_hint(genai.target))
+            .desired_rows(3)
+            .desired_width(f32::INFINITY),
+    );
+
+    // Cross-reference reminders so results aren't dropped as dangling.
+    match genai.target {
+        GenTarget::Troops if project.enemies.is_empty() => {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "No enemies exist yet — generate Monsters first so troops have members.",
+            );
+        }
+        GenTarget::Heroes | GenTarget::Monsters if project.skills.is_empty() => {
+            ui.small("Tip: generate Skills first if you want these to reference them.");
+        }
+        _ => {}
+    }
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let can_generate = llm_ready && !genai.busy();
+        if ui
+            .add_enabled(can_generate, egui::Button::new("✨ Generate"))
+            .clicked()
+        {
+            genai.status = None;
+            genai.submit = true;
+        }
+        if genai.busy() {
+            ui.spinner();
+            ui.label(format!("Generating {}…", genai.target.label()));
+        }
+    });
+
+    if !llm_ready {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "No LLM ready. Set up the Local or NVIDIA NIM backend in the LLM tab.",
+        );
+    }
+
+    if let Some(status) = &genai.status {
+        ui.add_space(4.0);
+        let ok = status.starts_with("Added");
+        let color = if ok {
+            egui::Color32::from_rgb(120, 220, 120)
+        } else {
+            egui::Color32::from_rgb(240, 180, 100)
+        };
+        ui.colored_label(color, status);
+    }
+}
+
+fn prompt_hint(target: GenTarget) -> &'static str {
+    match target {
+        GenTarget::Map => "e.g. a snowy mountain pass with a frozen lake and a ruined watchtower",
+        GenTarget::Heroes => "e.g. a stoic dragoon and a mischievous bard",
+        GenTarget::Monsters => "e.g. undead haunting a swamp, weak to fire and light",
+        GenTarget::Skills => "e.g. a set of wind spells and a shield-breaking axe art",
+        GenTarget::Troops => "e.g. balanced early-game packs mixing slimes and bats",
+        GenTarget::Items => "e.g. a tiered line of healing potions and an antidote",
+    }
 }
